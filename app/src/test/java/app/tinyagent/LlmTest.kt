@@ -176,9 +176,22 @@ class LlmTest {
         llm.check("Chrome is open", "App: X | popup: no | keyboard: no")
         llm.report("g", "done", "App: X | popup: no | keyboard: no")
         llm.look(st, byteArrayOf(1, 2, 3))
-        assertEquals(listOf(24, 2, 60, 12), api.calls.map { it.max })
+        assertEquals(listOf(24, 8, 60, 12), api.calls.map { it.max })
         assertEquals(listOf(0.1, 0.1, 0.3, 0.1), api.calls.map { it.temp })
         assertTrue(api.calls.last().msgs[1].jpeg != null)
+    }
+
+    @Test fun yesNoFromChattyReplies() {
+        for (r in listOf("Y", "y\n", "Yes.", "**Yes**", "Answer: Y", "\"Y\"", "<think>it shows YouTube</think>Yes", "Done", "Y - the app is open")) assertTrue(r, yes(r))
+        for (r in listOf("N", "No.", "Answer: N", "The screen does not show it", "", "Maybe", "<think>never closed")) assertTrue(r, !yes(r))
+    }
+
+    @Test fun checkPromptCarriesTheLastAction() {
+        val api = FakeApi("Answer: Y")
+        assertTrue(Llm(api).check("YouTube is open", "App: YouTube | popup: no | keyboard: no", "open YouTube -> opened YouTube"))
+        assertEquals("Last action: open YouTube -> opened YouTube\nScreen:\nApp: YouTube | popup: no | keyboard: no\nDoes the screen show this: YouTube is open?",
+            api.calls[0].msgs[1].text)
+        assertEquals(Prompts.CHECK, api.calls[0].msgs[0].text)
     }
 
     @Test fun checkParsesYesNoAndStructuredOutputs() {

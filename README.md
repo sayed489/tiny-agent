@@ -25,8 +25,8 @@ blocked. As a result it **will not run with Android 16 Advanced Protection turne
 
 ## Configure a model
 
-Any OpenAI-compatible `/chat/completions` endpoint works, cloud or self-hosted. Open **Settings**, choose a shortcut
-(or "Any OpenAI-compatible provider") and fill in:
+Any OpenAI-compatible `/chat/completions` endpoint works, cloud or self-hosted. Nothing is tied to one provider.
+Open **Settings** and paste what your provider gives you:
 
 | Field | What to enter |
 |---|---|
@@ -36,9 +36,9 @@ Any OpenAI-compatible `/chat/completions` endpoint works, cloud or self-hosted. 
 
 - **Test connection** runs one real PLAN call and one real ACT call on a sample screen and shows what the model wrote
   and what TinyAgent understood. Use it first whenever you change models.
-- **Vision-language models** (for example Liquid LFM2-VL): turn on "My model can see images". The same endpoint then
-  also reads screenshots when the screen has few labelled items. Set the screenshot size under Advanced
-  (LFM2-VL `320x704`, Qwen `352x768`).
+- **Vision-language models**: turn on "My model can see images". The same endpoint then also reads screenshots when
+  the screen has few labelled items. Set the screenshot size under Advanced to what your model's docs recommend.
+- Provider-specific sampling settings (for example `top_k`) go in Extra body under Advanced.
 - Plain `http://` is allowed so LAN servers work. Use `https://` for anything outside your own network.
 - Small models are the target. Reasoning models also work: when a reply comes back empty because the model spent its
   token budget thinking, TinyAgent raises the budget and asks for low reasoning effort, but each step is slower.

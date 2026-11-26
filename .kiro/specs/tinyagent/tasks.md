@@ -29,5 +29,6 @@ Waves run in order. Tasks inside a wave are independent: each edits only its own
 - [x] 5.7b v0.2.1 planning fix: reasoning-model budget + reasoning_effort, plans with ->/→ arrows or plain lists, direct answers ("answer:"), looser tap labels, New chat, visible warnings, latest plan only
 - [x] 5.7c v0.2.2 provider-neutral settings (any OpenAI-compatible API), vision-language model toggle, Test connection runs a real PLAN + ACT probe, lenient tiny-model reply parsing, Base URL without /v1
 - [x] 5.7d v0.2.3 pasted Base URL/key cleaning, Liquid AI shortcut (lfm3-vl-2b), model list shown on a wrong model name
+- [x] 5.7e v0.2.4 CHECK fix: 8-token reply, yes/no found anywhere in the reply, last action given as evidence; 3+ scrolls in a row count as no progress; plan shown with ✓/▶; provider shortcuts and model autofill removed
 - [ ] 5.6 Manual on-device test: onboarding, the 3 sample goals, volume-down kill switch, vision fallback (needs a phone)
 - [ ] 5.7 Open a PR (needs a GitHub repository; none was provided)

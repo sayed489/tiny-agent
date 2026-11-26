@@ -15,7 +15,7 @@ sealed class Cmd {
 interface Brain {
     fun plan(goal: String, facts: List<String>, screen: String): List<Step>
     fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String): String
-    fun check(doneWhen: String, screen: String): Boolean
+    fun check(doneWhen: String, screen: String, last: String = "none"): Boolean
     fun report(goal: String, status: String, screen: String): String
     fun look(step: Step, jpeg: ByteArray): String
 }
@@ -76,10 +76,11 @@ class Llm(
         return send("ACT", api, Prompts.ACT, user, 0.1, 24)
     }
 
-    override fun check(doneWhen: String, screen: String): Boolean {
-        val user = fit(Prompts.CHECK, screen) { "Screen:\n$it\nDoes the screen show this: $doneWhen?" }
+    /** [last] is the action that led to this screen and its result, e.g. "open YouTube -> opened YouTube". */
+    override fun check(doneWhen: String, screen: String, last: String): Boolean {
+        val user = fit(Prompts.CHECK, screen) { "Last action: $last\nScreen:\n$it\nDoes the screen show this: $doneWhen?" }
         val extra: Map<String, Any?> = if (yesNo) mapOf("structured_outputs" to mapOf("choice" to listOf("Y", "N"))) else emptyMap()
-        return cleanLine(firstLine(send("CHECK", api, Prompts.CHECK, user, 0.1, 2, extra))).startsWith("y", ignoreCase = true)
+        return yes(send("CHECK", api, Prompts.CHECK, user, 0.1, 8, extra)) // 8 tokens: room for "Answer: Y" or "**Yes**"
     }
 
     override fun report(goal: String, status: String, screen: String): String {
@@ -128,6 +129,13 @@ fun firstLine(reply: String): String {
     if (e >= 0) s = s.substring(e + 8)
     return s.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: ""
 }
+
+/** The first yes/no word anywhere in the reply ("Y", "Yes.", "Answer: Y", "**N**", "y\n"). No such word counts as no. */
+fun yes(reply: String): Boolean {
+    val s = reply.substringAfterLast("</think>").let { if (it.contains("<think>")) it.substringBefore("<think>") else it }
+    return s.lowercase().split(' ', '\n', ':', ',', '.', '*', '"', '\'', '(', ')', '!', '-', '`').firstOrNull { it in YES || it in NO }?.let { it in YES } == true
+}
+private val YES = setOf("y", "yes", "true", "done"); private val NO = setOf("n", "no", "false", "not")
 
 /** Strip backticks, list markers, numbering, a leading "Action:"/"Command:" and surrounding quotes. */
 fun cleanLine(line: String): String {

@@ -33,7 +33,7 @@ class Agent(
     fun stop() { stopped = true }
     private val facts = ArrayList<String>(); private val ran = HashSet<String>() // ran = (screen hash, command) pairs
     private var actions = 0; private var replans = 0; private var t0 = 0L; private var curK = 1
-    private var vision = cfg.vision != null; private var w = 1080; private var h = 2400
+    private var vision = cfg.vision != null; private var w = 1080; private var h = 2400; private var lastDone = "none" // CHECK evidence
 
     fun run(goal: String): String {
         t0 = now()
@@ -44,12 +44,13 @@ class Agent(
             ui.status("Planning…") // the "Goal:" log line is written by the chat screen
             var plan = newPlan(goal, first = true)
             plan.singleOrNull()?.takeIf { it.doing.isEmpty() }?.let { throw Halt("answered", it.doneWhen) } // no phone action needed
+            logPlan(plan)
             dev.key("home"); dev.settle()
             var k = 0; var fresh = false
             while (k < plan.size) {
                 val st = plan[k]; curK = k + 1
                 ui.status("Step ${k + 1}/${plan.size}: ${st.doing}")
-                if ((k > 0 || fresh) && call { brain.check(st.doneWhen, read()) }) { ui.log("✓ ${k + 1} already done"); fresh = false; k++; continue }
+                if ((k > 0 || fresh) && call { brain.check(st.doneWhen, read(), lastDone) }) { ui.log("✓ ${k + 1} already done"); fresh = false; k++; continue }
                 fresh = false
                 if (((st.risky && cfg.confirmRisky) || cfg.confirmEvery) && !ui.ask("About to: ${st.doing}"))
                     throw Halt("stopped", "You declined: ${st.doing}")
@@ -57,6 +58,7 @@ class Agent(
                 if (++replans > 2) throw Halt("stuck at step ${k + 1}", "Stuck at step ${k + 1}: ${st.doing}")
                 ui.status("Replanning…"); ui.log("↻ Replanning (${replans}/2)")
                 plan = plan.take(k) + newPlan(goal, first = false).ifEmpty { throw Halt("stuck at step ${k + 1}", "Stuck at step ${k + 1}: ${st.doing}") }
+                logPlan(plan) // the whole plan, so step numbers in "✓ k" stay right
                 fresh = true
             }
             status = "done"
@@ -78,10 +80,9 @@ class Agent(
     private fun newPlan(goal: String, first: Boolean): List<Step> {
         val p = call { brain.plan(goal, facts.toList(), Screen.digest(dev.windows(), Mode.READ, 120, w, h).text) }
             .filter { first || it.doing.isNotEmpty() }
-        if (p.singleOrNull()?.doing?.isEmpty() == true) return p
-        p.forEachIndexed { i, s -> ui.log("Plan ${i + 1}: ${if (s.risky) "!" else ""}${s.doing} => ${s.doneWhen}") }
         return p
     }
+    private fun logPlan(p: List<Step>) = p.forEachIndexed { i, s -> ui.log("Plan ${i + 1}: ${if (s.risky) "!" else ""}${s.doing} => ${s.doneWhen}") }
 
     /** REPORT skips the action/time budget (it runs after a budget stop) but still honours Stop. */
     private fun report(goal: String, status: String): String = if (stopped) "Stopped" else try {
@@ -91,7 +92,7 @@ class Agent(
     /** Runs one step. true = step done, false = replan needed. */
     private fun step(goal: String, st: Step, k: Int, n: Int): Boolean {
         var wins = dev.windows(); var d = act(wins)
-        var noProg = 0; var acts = 0; var last = "none"
+        var noProg = 0; var acts = 0; var last = "none"; var scrolls = 0
         val tried = ArrayDeque<String>(); val seen = hashSetOf(d.hash)
         while (true) {
             budget()
@@ -127,9 +128,13 @@ class Agent(
                 d2.hash in seen -> { last = "$label -> back to an earlier screen"; noProg++ }
                 else -> {
                     last = "$label -> screen changed"; seen += d2.hash
-                    if (call { brain.check(st.doneWhen, Screen.digest(wins2, Mode.READ, 200, w, h).text) }) return true
+                    if (cmd is Cmd.Scroll && ++scrolls > 2) { last = "$label -> screen changed; scrolled $scrolls times in a row, try another command"; noProg++ }
+                    lastDone = "$label -> ${res.msg}"
+                    if (call { brain.check(st.doneWhen, Screen.digest(wins2, Mode.READ, 200, w, h).text, lastDone) }) return true
+                    ui.log("· not yet: ${st.doneWhen}")
                 }
             }
+            if (cmd !is Cmd.Scroll) scrolls = 0
             tried.addLast(label); if (tried.size > 3) tried.removeFirst()
             wins = wins2; d = d2
         }

@@ -123,25 +123,32 @@ class Main : Activity() {
         if (!phone.start(goal, Store.config(this))) RunLog.add("Result (error): Could not start")
     }
 
-    /** Rebuilds the chat from the shared run log: your goal, one progress bubble (latest plan + actions), then the result. */
+    /** Rebuilds the chat from the shared run log: your goal, a progress bubble (plan with ✓ done / ▶ current, latest actions), the result. */
     private fun render() {
         msgs.removeAllViews(); busy = false
-        var steps = ArrayList<String>(); var replan = ""
-        fun flush() { if (steps.isNotEmpty()) msgs.addView(bubble((listOf(replan) + steps).filter { it.isNotEmpty() }.joinToString("\n"), false, 0xFFE9EAF2.toInt(), 13f)); steps = ArrayList(); replan = "" }
+        var plan = ArrayList<String>(); val done = HashSet<Int>(); var acts = ArrayList<String>(); var replan = ""
+        fun flush() {
+            val cur = (1..plan.size).firstOrNull { it !in done }
+            val lines = (if (replan.isEmpty()) emptyList() else listOf(replan)) +
+                plan.mapIndexed { i, p -> (if (i + 1 in done) "✓ " else if (busy && i + 1 == cur) "▶ " else "    ") + "${i + 1}. $p" } +
+                (if (acts.isEmpty() || plan.isEmpty()) acts else listOf("") + acts.takeLast(5)) + (if (busy) listOf("…") else emptyList())
+            if (plan.isNotEmpty() || acts.isNotEmpty()) msgs.addView(bubble(lines.joinToString("\n"), false, 0xFFE9EAF2.toInt(), 13f))
+            plan = ArrayList(); done.clear(); acts = ArrayList(); replan = ""
+        }
+        fun note(x: String) { if (acts.lastOrNull() != x) acts += x }
         for (l in RunLog.text().lines()) when {
             l.startsWith("Goal: ") -> { flush(); msgs.addView(bubble(l.drop(6), true)); busy = true }
             l.startsWith("Result (") -> {
-                flush(); busy = false
+                busy = false; flush()
                 val st = l.substringBefore("): ").drop(8)
                 msgs.addView(bubble(l.substringAfter("): "), false, when (st) { "done" -> 0xFFDDF5E4.toInt(); "stopped", "answered" -> Color.WHITE; else -> 0xFFFDE7E7.toInt() }))
             }
-            l.startsWith("↻ ") -> { steps = ArrayList(); replan = l } // a replan replaces the old plan in the bubble
-            l.startsWith("Plan ") -> steps += "${l.substring(5, l.indexOf(':'))}. ${l.substringAfter(": ").substringBefore(" =>")}"
-            l.startsWith("→ ") -> steps += "· " + l.drop(2)
-            l.startsWith("⚠ ") && steps.lastOrNull() != l -> steps += l
-            l.startsWith("✓ ") || l.startsWith("Asked") || l.startsWith("API error") || l.startsWith("Volume") -> steps += l
+            l.startsWith("↻ ") -> { replan = l; acts = ArrayList() }
+            l.startsWith("Plan ") -> { if (l.startsWith("Plan 1:")) plan = ArrayList(); plan += l.substringAfter(": ").substringBefore(" =>") }
+            l.startsWith("✓ ") -> { l.drop(2).takeWhile { it.isDigit() }.toIntOrNull()?.let { done += it }; acts = ArrayList() }
+            l.startsWith("→ ") -> acts += "· " + l.drop(2)
+            l.startsWith("· not yet") || l.startsWith("⚠ ") || l.startsWith("Asked") || l.startsWith("API error") || l.startsWith("Volume") -> note(l)
         }
-        if (busy) steps += "…"
         flush()
         if (msgs.childCount == 0) {
             msgs.addView(tv("Hi! Tell me what to do on your phone and I'll do it for you.", 16f).apply { setPadding(dp(4), dp(24), dp(4), dp(8)) })
@@ -162,10 +169,6 @@ class Main : Activity() {
 
 /** Settings screen: model + API key first, then permissions, behaviour, advanced options and tools. */
 class Options : Activity() {
-    /** Shortcuts that only fill in the Base URL. Any other OpenAI-compatible endpoint works with "Any provider". */
-    private val presets = listOf("Any OpenAI-compatible provider" to "", "Liquid AI" to "https://api.liquid.ai/openai/v1", "OpenAI" to "https://api.openai.com/v1", "OpenRouter" to "https://openrouter.ai/api/v1",
-        "Groq" to "https://api.groq.com/openai/v1", "Together AI" to "https://api.together.xyz/v1", "Ollama (your PC)" to "http://192.168.1.10:11434/v1",
-        "LM Studio (your PC)" to "http://192.168.1.10:1234/v1", "llama.cpp server (your PC)" to "http://192.168.1.10:8080/v1", "vLLM (your server)" to "http://192.168.1.10:8000/v1")
     private val f = LinkedHashMap<String, EditText>(); private val sw = LinkedHashMap<String, Switch>()
     private lateinit var col: LinearLayout; private lateinit var adv: LinearLayout
     private lateinit var a11y: TextView; private lateinit var bat: TextView; private lateinit var out: TextView
@@ -177,26 +180,10 @@ class Options : Activity() {
             gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), dp(8), dp(8), dp(8)); setBackgroundColor(Color.WHITE)
             addView(btn("‹ Back", Color.TRANSPARENT, ACCENT) { finish() }); addView(tv("Settings", 18f, bold = true))
         }
-        head("AI model"); note("Works with any OpenAI-compatible chat API, cloud or your own server, including tiny models such as Liquid LFM2-VL. Pick a shortcut or type your own Base URL.")
-        val sp = Spinner(this).apply { adapter = ArrayAdapter(this@Options, android.R.layout.simple_spinner_dropdown_item, presets.map { it.first }) }
-        var last = presets.indexOfFirst { it.second == cleanBaseUrl(Store.get(this, "url")) }.coerceAtLeast(0)
-        sp.setSelection(last)
-        sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: View?, i: Int, id: Long) {
-                if (i == last) return else last = i
-                presets[i].second.takeIf { it.isNotEmpty() }?.let { f.getValue("url").setText(it) }
-                if (presets[i].first == "Liquid AI") { // Liquid's documented defaults for their models
-                    if (f.getValue("model").text.isBlank()) f.getValue("model").setText("lfm3-vl-2b")
-                    if (f.getValue("extra").text.isBlank()) f.getValue("extra").setText("{\"top_k\":50,\"repetition_penalty\":1.1}")
-                }
-            }
-            override fun onNothingSelected(p: AdapterView<*>?) {}
-        }
-        col.put(sp)
+        head("AI model"); note("Any OpenAI-compatible chat API: paste the Base URL, API key and model name exactly as your provider gives them.")
         field("url", "Base URL (the part before /chat/completions)", "https://your-provider.com/v1"); field("key", "API key (leave empty if your server has none)", "paste key", masked = true)
         field("model", "Model name (exactly as your provider lists it)", "model name")
         toggle("vis", "My model can see images: also use it to read screenshots", false)
-        note("Image size for screenshots is under Advanced (LFM2-VL: 320x704).")
         out = note("")
         col.put(btn("Test connection") { testConnection() }); col.put(out)
         head("Permissions")
@@ -209,7 +196,7 @@ class Options : Activity() {
         head("Advanced", adv); note("Extra body is merged into every request, for example {\"chat_template_kwargs\":{\"enable_thinking\":false}} for Qwen3 on vLLM or llama.cpp.", adv)
         field("pmodel", "Plan model (optional, defaults to Model)", "", into = adv); field("extra", "Extra request body (JSON)", "{}", into = adv)
         field("vurl", "Separate vision Base URL (optional)", "", into = adv); field("vkey", "Vision API key", "", masked = true, into = adv)
-        field("vmodel", "Vision model", "", into = adv); field("img", "Screenshot size WxH (Qwen 352x768, LFM2-VL 320x704)", "352x768", def = "352x768", into = adv)
+        field("vmodel", "Vision model", "", into = adv); field("img", "Screenshot size WxH sent to the vision model", "352x768", def = "352x768", into = adv)
         toggle("yn", "Constrain CHECK to Y/N (vLLM only)", false, adv)
         head("Tools")
         col.put(btn("Copy debug log", Color.WHITE, ACCENT) {

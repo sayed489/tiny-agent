@@ -38,7 +38,8 @@ class FakeBrain(
     private var lastPlan = emptyList<Step>()
     override fun plan(goal: String, facts: List<String>, screen: String): List<Step> { planFacts += facts; lastPlan = plans.removeFirstOrNull() ?: lastPlan; return lastPlan }
     override fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String): String { actLasts += last; return acts(screen, last) }
-    override fun check(doneWhen: String, screen: String): Boolean { checks++; return screen.contains(doneWhen) }
+    val checkLasts = ArrayList<String>()
+    override fun check(doneWhen: String, screen: String, last: String): Boolean { checks++; checkLasts += last; return screen.contains(doneWhen) }
     override fun report(goal: String, status: String, screen: String): String { reports++; return "report: $status" }
     override fun look(step: Step, jpeg: ByteArray): String = looks.removeFirstOrNull() ?: "key back"
 }
@@ -108,6 +109,27 @@ class AgentTest {
         val row = rows.single().split(',')
         assertEquals(listOf("weather in Tokyo", "tiny", "3", "7", "321", "0", "0"), row.take(7))
         assertEquals("done", row.last())
+    }
+
+    @Test fun checkGetsTheLastActionAsEvidence() {
+        val dev = weatherDevice()
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com", "Google", false)))), { _, _ -> "open google.com" })
+        Agent(dev, brain, FakeUi(), cfg).run("open google")
+        assertEquals(listOf("open google.com -> opened"), brain.checkLasts)
+    }
+
+    @Test fun endlessScrollingCountsAsNoProgress() {
+        // Every scroll shows new content (the hash changes), but the step never completes.
+        val feed = (0..20).associate { "s$it" to listOf(app(textNode("Video number $it", 300), button("More options $it", 500), button("Share $it", 700))) }
+        var i = 0
+        val dev = FakeDevice("s0", feed) { a -> if (a == "scroll down") { screen = "s${++i}"; Res(true, "scrolled down") } else Res(true, "ok") }
+        val ui = FakeUi()
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("find the subscribe button", "Subscribed", false)))), { _, _ -> "scroll down" })
+        Agent(dev, brain, ui, cfg).run("subscribe")
+        val before = ui.logs.takeWhile { it != "↻ Replanning (1/2)" }.count { it.startsWith("→ ") }
+        assertEquals(6, before) // 2 free scrolls, then 4 more count as no progress (was 8 before)
+        assertTrue(brain.actLasts.any { it.contains("scrolled 3 times in a row, try another command") })
+        assertTrue(ui.logs.contains("· not yet: Subscribed"))
     }
 
     @Test fun lastAndTriedUseLabelForm() {

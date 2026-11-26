@@ -42,6 +42,9 @@ These are as specified in brief section 2, with these additions:
 | API errors after client retries go to `ui.ask("…Retry?")` | This is the "pause and show the error" behaviour. |
 | PLAN prompt differs from the brief's exact text (v0.2.1) | Adds "one step per part of the task" for compound goals and an `answer:` line for chat messages like "Hello"; still ≤150 tokens. |
 | Reasoning models: on an empty, cut-off reply, raise the output budget to 2048 and send `reasoning_effort` (low, then none) | gpt-5/o-series spent the 24-150 token budgets on reasoning and returned nothing, which made every plan fall back to one giant step. |
+| CHECK sends `Last action: …`, allows 8 output tokens and takes the first yes/no word anywhere in the reply | With 2 tokens and a starts-with-Y test, a small model that wrote "Answer: Y" was read as no, so steps (for example "YouTube is open") never ticked. |
+| A 3rd consecutive scroll on a step counts as no progress | New content changes the hash, so aimless scrolling never looked stuck and used all 8 actions. |
+| No provider presets or model autofill | Settings stay provider-neutral: the user pastes Base URL, key and model. |
 | `usesCleartextTraffic=true` | Self-hosted servers on a LAN usually serve plain HTTP. The README tells users to use HTTPS elsewhere. |
 
 ## Speed
