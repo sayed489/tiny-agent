@@ -160,7 +160,7 @@ class ApiTest {
     @Test fun rejectedSwitchFallsBackToTheNextOne() {
         responses.addAll(listOf(200 to emptyCutOff(), 400 to """{"error":{"message":"Unknown field: chat_template_kwargs"}}""", 200 to ok("tap 2")))
         assertEquals("tap 2", OpenAiCompat(Endpoint(base, "k", "t2"), longArrayOf(1, 1)).chat(u, 0.1, 24, think = false).text)
-        assertEquals("none", hits[2].body.getString("reasoning_effort")); assertTrue(!hits[2].body.has("chat_template_kwargs"))
+        assertEquals(false, hits[2].body.getBoolean("enable_thinking")); assertTrue(!hits[2].body.has("chat_template_kwargs"))
     }
 
     @Test fun ignoredSwitchMovesToTheNextOneNextTime() {
@@ -169,7 +169,47 @@ class ApiTest {
         val api = OpenAiCompat(Endpoint(base, "k", "t3"), longArrayOf(1, 1))
         assertEquals("tap 2", api.chat(u, 0.1, 24, think = false).text)
         assertEquals("tap 3", api.chat(u, 0.1, 24, think = false).text)
-        assertTrue(thinkingOff(hits[1])); assertEquals("none", hits[2].body.getString("reasoning_effort"))
+        assertTrue(thinkingOff(hits[1])); assertEquals(false, hits[2].body.getBoolean("enable_thinking"))
+    }
+
+    @Test fun unknownParameterFromExtraBodyIsDropped() { // the Azure error from the screenshot
+        responses.addAll(listOf(
+            400 to """{"error":{"message":"Unknown parameter: 'top_k'. Did you mean 'top_p'?"}}""",
+            400 to """{"error":{"message":"Unrecognized request argument supplied: repetition_penalty"}}""",
+            200 to ok("OK"), 200 to ok("again")))
+        val api = OpenAiCompat(Endpoint(base, "k", "gpt-6-luna", """{"top_k":50,"repetition_penalty":1.1,"top_p":0.9}"""), longArrayOf(1, 1))
+        assertEquals("OK", api.chat(u, 0.1, 8).text)
+        assertTrue(hits[0].body.has("top_k")); assertTrue(!hits[1].body.has("top_k") && hits[1].body.has("repetition_penalty"))
+        assertTrue(!hits[2].body.has("repetition_penalty") && hits[2].body.has("top_p")) // only the rejected ones go
+        assertEquals(setOf("top_k", "repetition_penalty"), api.dropped)
+        assertEquals("again", api.chat(u, 0.1, 8).text); assertEquals(4, hits.size) // remembered: no failed round trip
+    }
+
+    @Test fun unrelatedBadRequestStillFails() {
+        responses.add(400 to """{"error":{"message":"The model `nope` does not exist"}}""")
+        try { OpenAiCompat(Endpoint(base, "k", "nope", """{"top_k":50}"""), longArrayOf(1, 1)).chat(u, 0.1, 8); fail() } catch (e: ApiError) { assertEquals(400, e.code) }
+        assertEquals(1, hits.size)
+    }
+
+    @Test fun providerHintsPickTheRightThinkingSwitchFirst() {
+        fun first(host: String) = OpenAiCompat.OFF[OpenAiCompat.hint(host)].let { "${it.first}=${it.second}" }
+        assertEquals("reasoning_effort=none", first("x-resource.openai.azure.com"))
+        assertEquals("reasoning_effort=none", first("api.fireworks.ai"))
+        assertEquals("reasoning_effort=none", first("api.openai.com"))
+        assertEquals("thinking={\"type\":\"disabled\"}", first("api.deepseek.com"))
+        assertEquals("chat_template_kwargs={\"enable_thinking\":false}", first("192.168.1.20"))
+        assertEquals("enable_thinking=false", first("dashscope.aliyuncs.com"))
+        assertEquals("reasoning={\"enabled\":false}", first("openrouter.ai"))
+        assertTrue(OpenAiCompat.OFF.any { it.first == "think" }) // Ollama
+    }
+
+    @Test fun rejectedSwitchIsSkippedAndTheWorkingOneRemembered() {
+        responses.addAll(listOf(200 to emptyCutOff(),
+            400 to """{"error":{"message":"Unsupported value: 'chat_template_kwargs' is not supported with this model."}}""",
+            200 to ok("tap 2")))
+        val api = OpenAiCompat(Endpoint(base, "k", "gpt5ish"), longArrayOf(1, 1))
+        assertEquals("tap 2", api.chat(u, 0.1, 24, think = false).text)
+        assertEquals("enable_thinking=false", api.offSwitch)
     }
 
     @Test fun userExtraBodyOverridesTheSwitch() {

@@ -40,6 +40,20 @@ Open **Settings** and paste what your provider gives you:
   the screen has few labelled items. Set the screenshot size under Advanced to what your model's docs recommend.
 - Provider-specific sampling settings (for example `top_k`) go in Extra body under Advanced.
 - Plain `http://` is allowed so LAN servers work. Use `https://` for anything outside your own network.
+- **Thinking (reasoning) models are switched off for quick calls** (choosing an action, checking a step, the report).
+  TinyAgent tries the provider's documented switch first and remembers the one that works:
+
+  | Provider | Switch sent |
+  |---|---|
+  | OpenAI, Azure OpenAI, Fireworks, Groq, Gemini | `reasoning_effort: "none"` (then `"minimal"`, then `"low"` for models without `none`) |
+  | DeepSeek, Z.ai GLM, Moonshot Kimi, Volcengine | `thinking: {"type": "disabled"}` |
+  | vLLM, SGLang, llama.cpp, LM Studio (your own server) | `chat_template_kwargs: {"enable_thinking": false}` |
+  | Alibaba DashScope (Qwen), SiliconFlow | `enable_thinking: false` |
+  | OpenRouter | `reasoning: {"enabled": false}` |
+  | Ollama | `think: false` |
+
+  Settings → Test connection shows which switch worked and how long one action took.
+- Parameters a server rejects (for example `top_k` on Azure) are dropped automatically and not sent again.
 - Small models are the target. Reasoning models also work: when a reply comes back empty because the model spent its
   token budget thinking, TinyAgent raises the budget and asks for low reasoning effort, but each step is slower.
 - Extra body (Advanced) is merged into every request. For Qwen3-style models on vLLM or llama.cpp, set

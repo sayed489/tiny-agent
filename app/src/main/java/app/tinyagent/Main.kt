@@ -223,16 +223,23 @@ class Options : Activity() {
             val r = try {
                 val api = ChatApi.create(Endpoint(v("url"), v("key"), v("model"), v("extra")))
                 val scr = "App: Launcher | popup: no | keyboard: no\n1 button YouTube\n2 button Chrome\n3 button Camera"
-                val p = api.chat(listOf(Msg("system", Prompts.PLAN), Msg("user", "Task: open YouTube and search for cats\nFacts: none\nScreen now:\n$scr")), 0.3, 150)
-                val a = api.chat(listOf(Msg("system", Prompts.ACT), Msg("user", "Goal: open YouTube\nStep 1 of 1: open YouTube (done when: YouTube is open)\nLast: none\nTried: none\nScreen:\n$scr")), 0.1, 24)
+                val p = api.chat(listOf(Msg("system", Prompts.PLAN), Msg("user", "Task: open YouTube and search for cats\nFacts: none\nApps: Camera, Chrome, Clock, YouTube\nScreen now:\n$scr")), 0.3, 240, think = false)
+                val am = listOf(Msg("system", Prompts.ACT), Msg("user", "Goal: open YouTube\nStep 1 of 1: open YouTube (done when: YouTube is open)\nLast: none\nTried: none\nScreen:\n$scr"))
+                val a = api.chat(am, 0.1, 48, think = false).let { if ((api as? OpenAiCompat)?.thinks == true) api.chat(am, 0.1, 48, think = false) else it }
+                val o = api as? OpenAiCompat
                 val steps = parsePlan(p.text); val cmd = parse(a.text, emptyList(), 3)
                 fun raw(t: String) = "“" + t.substringAfterLast("</think>").trim().replace('\n', ' ').take(90) + "”"
                 "✓ Connected (${p.ms + a.ms} ms)\nPlan: " + (if (steps.isEmpty()) "✗ could not read ${raw(p.text)}" else steps.joinToString(" › ") { it.doing.ifEmpty { "answer" } }) +
                     "\nAction: " + (cmd.first?.let { "✓ $it" } ?: "✗ could not read ${raw(a.text)} (${cmd.second})") +
-                    if ((api as? OpenAiCompat)?.thinks == true) "\nThis is a reasoning model: it works, but each step is slower." else ""
+                    "\nSpeed: one action took ${a.ms} ms" + (if (a.completionTokens > 0) " (${a.completionTokens} output tokens)" else "") +
+                    (if (o?.thinks != true) "" else o.offSwitch?.let { "\nThinking: switched off with $it ✓" } ?: "\nThinking: this model keeps thinking, so each step is slower") +
+                    (if (o?.dropped.isNullOrEmpty()) "" else "\nNot supported by this server, so no longer sent: " + o!!.dropped.joinToString(", "))
             } catch (e: Exception) {
-                val ids = if (e is ApiError && e.code in listOf(400, 404, 422)) try { ChatApi.create(Endpoint(v("url"), v("key"), v("model"), v("extra"))).models() } catch (x: Exception) { emptyList() } else emptyList()
-                "✗ ${e.message}" + if (ids.isEmpty()) "" else "\nModel names you can use: " + ids.take(15).joinToString(", ")
+                val m = e.message.orEmpty().lowercase()
+                val aboutModel = e is ApiError && e.code in listOf(400, 404, 422) && (m.contains("model") || m.contains("deployment"))
+                val ids = if (aboutModel) try { ChatApi.create(Endpoint(v("url"), v("key"), v("model"), v("extra"))).models() } catch (x: Exception) { emptyList() } else emptyList()
+                "✗ ${e.message}" + (if (aboutModel && cleanBaseUrl(v("url")).contains(".azure.")) "\nOn Azure, Model is your deployment name." else "") +
+                    if (ids.isEmpty()) "" else "\nModel names this server lists: " + ids.take(15).joinToString(", ")
             }
             runOnUiThread { out.text = r }
         }.start()

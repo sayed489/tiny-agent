@@ -57,17 +57,40 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
 
     /**
      * What we learned about this endpoint from its replies, shared by every task until the app restarts.
-     * - HTTP 400s: newer OpenAI models want max_completion_tokens and only the default temperature.
-     * - Thinking models (hidden reasoning, <think>, far more tokens than the answer): think = false calls try the standard
-     *   off switches until one works: chat_template_kwargs.enable_thinking = false (vLLM, SGLang, llama.cpp), then
-     *   reasoning_effort "none", then "low". Thinking calls get 2,048 output tokens, raised once to 4,096.
+     * - HTTP 400s: newer OpenAI models want max_completion_tokens and only the default temperature; any other parameter
+     *   the server names as unknown/unsupported (e.g. top_k from Extra body on Azure) is dropped from then on.
+     * - Thinking models (hidden reasoning, <think>, far more tokens than the answer): think = false calls send one of the
+     *   thinking-off switches in OFF, starting from a hint for known hosts, moving on when one is rejected or ignored.
+     *   Thinking calls get 2,048 output tokens, raised once to 4,096.
      */
-    private class Quirks { var tokenKey = "max_tokens"; var sendTemp = true; var thinks = false; var budget = 2048; var off = 0 }
-    private companion object {
-        val learned = HashMap<String, Quirks>()
-        val OFF: List<Pair<String, Any>> = listOf("chat_template_kwargs" to JSONObject().put("enable_thinking", false), "reasoning_effort" to "none", "reasoning_effort" to "low")
+    private class Quirks(var off: Int) { var tokenKey = "max_tokens"; var sendTemp = true; var thinks = false; var budget = 2048; var offOk = false; val drop = HashSet<String>() }
+    internal companion object {
+        private val learned = HashMap<String, Quirks>()
+        private fun o(k: String, v: Any) = JSONObject().put(k, v)
+        val OFF: List<Pair<String, Any>> = listOf(
+            "reasoning_effort" to "none", // OpenAI, Azure OpenAI, Fireworks, Groq, Gemini
+            "thinking" to o("type", "disabled"), // DeepSeek V4, Z.ai GLM, Kimi, MiniMax, Volcengine, Anthropic-style
+            "chat_template_kwargs" to o("enable_thinking", false), // vLLM, SGLang, llama.cpp, LM Studio
+            "enable_thinking" to false, // Alibaba DashScope (Qwen), SiliconFlow
+            "reasoning" to o("enabled", false), // OpenRouter
+            "think" to false, // Ollama
+            "reasoning_effort" to "minimal", // OpenAI/Azure gpt-5 (no "none")
+            "reasoning_effort" to "low") // o-series and other models that can't switch off
+        /** Where to start in OFF for a host, so known providers get their switch on the first try. */
+        fun hint(host: String) = when {
+            host.contains("deepseek") || host.contains("bigmodel") || host.contains("z.ai") || host.contains("moonshot") || host.contains("volces") -> 1
+            host.contains("dashscope") || host.contains("aliyuncs") || host.contains("siliconflow") -> 3
+            host.contains("openrouter") -> 4
+            host.startsWith("localhost") || host.startsWith("127.") || host.startsWith("10.") || host.startsWith("192.168.") || host.endsWith(".local") -> 2
+            else -> 0
+        }
     }
-    private val q = synchronized(learned) { learned.getOrPut("$url|${ep.model}") { Quirks() } }
+    private val q = synchronized(learned) { learned.getOrPut("$url|${ep.model}") { Quirks(hint(runCatching { URL(base).host.lowercase() }.getOrDefault(""))) } }
+
+    /** Parameters this server rejected and that are no longer sent (shown by Test connection). */
+    val dropped: Set<String> get() = q.drop
+    /** The thinking-off switch that worked here, e.g. reasoning_effort=none, or null. */
+    val offSwitch: String? get() = if (q.offOk && q.off < OFF.size) OFF[q.off].let { "${it.first}=${it.second}" } else null
 
     /** True once this endpoint has shown it is a reasoning ("thinking") model: it works, but slower. */
     val thinks get() = q.thinks
@@ -82,10 +105,12 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
             if (off) OFF[q.off].let { body.put(it.first, it.second) }
             extraBody?.let { e -> e.keys().forEach { body.put(it, e.get(it)) } } // the user's Extra body wins
             extra.forEach { (k, v) -> body.put(k, json(v)) }
+            q.drop.forEach { body.remove(it) }
             try {
                 val wasThinking = q.thinks
                 val (r, cutOff, thought) = post(body.toString().toByteArray(), if (q.thinks) 90_000 else 30_000)
-                if (thought) { if (off) q.off++; q.thinks = true } // that switch didn't stop the thinking: next call tries the next one
+                if (thought) { if (off) { q.off++; q.offOk = false }; q.thinks = true } // that switch didn't stop the thinking: try the next
+                else if (off) q.offOk = true
                 if (!cutOff || adapts++ >= 3) return r
                 if (!think && q.off < OFF.size) continue // retry straight away with a thinking-off switch
                 if (wasThinking) q.budget = minOf(q.budget * 2, 4096)
@@ -93,9 +118,12 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
                 if (e.code == 404 && !triedV1 && runCatching { URL(base).path.isEmpty() }.getOrDefault(false)) { // "http://host:8000" without /v1
                     triedV1 = true; url = "$base/v1/chat/completions"; continue
                 }
-                if (e.code == 400 && adapts++ < 5) {
-                    if (adapt(e.message.orEmpty())) continue
-                    if (off) { q.off++; continue } // this server rejects that thinking switch: try the next one
+                if ((e.code == 400 || e.code == 422) && adapts++ < 12) {
+                    val m = e.message.orEmpty()
+                    if (adapt(m)) continue
+                    val bad = rejected(m)
+                    if (off && (bad == null || bad == OFF[q.off].first)) { q.off++; continue } // the thinking switch was rejected: next one
+                    if (bad != null) { q.drop += bad; continue } // e.g. "Unknown parameter: 'top_k'": stop sending it
                 }
                 if (!e.retryable || attempt >= waits.size) throw e
                 Thread.sleep(waits[attempt++])
@@ -107,6 +135,18 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
         q.tokenKey == "max_tokens" && m.contains("max_completion_tokens") -> { q.tokenKey = "max_completion_tokens"; true }
         q.sendTemp && m.contains("temperature") -> { q.sendTemp = false; true }
         else -> false
+    }
+
+    /** The parameter a 400 complains about, if the error names one we send. Model and messages are never dropped. */
+    private fun rejected(m: String): String? {
+        val low = m.lowercase()
+        if (listOf("unknown", "unrecognized", "unsupported", "not supported", "not permitted", "not allowed", "extra", "invalid").none { low.contains(it) }) return null
+        val sent = listOf("top_k", "top_p", "min_p", "repetition_penalty", "frequency_penalty", "presence_penalty", "seed", "stop",
+            "structured_outputs") + OFF.map { it.first } + (extraBody?.keys()?.asSequence()?.toList() ?: emptyList())
+        fun at(k: String) = listOf("'$k'", "\"$k\"", "`$k`", " $k ", " $k.", " $k,", ": $k").map { m.indexOf(it) }.filter { it >= 0 }.minOrNull()
+            ?: if (m.endsWith(" $k")) m.length - k.length else null
+        // The parameter named first: "Unknown parameter 'top_k'. Did you mean 'top_p'?" means top_k.
+        return sent.distinct().filter { it !in q.drop && it != "model" && it != "messages" }.mapNotNull { k -> at(k)?.let { k to it } }.minByOrNull { it.second }?.first
     }
 
     override fun models(): List<String> = try {
