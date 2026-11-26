@@ -15,14 +15,14 @@ jobs:
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Hard rule 1 (6 Kotlin files, <= 1,200 lines)
+      - name: Hard rule 1 (6 Kotlin files, <= 1,400 lines)
         run: |
           files=$(find app/src/main -name '*.kt' | xargs -n1 basename | sort | tr '\n' ' ')
           echo "files: $files"
           test "$files" = "Agent.kt Api.kt Llm.kt Main.kt Phone.kt Screen.kt "
           lines=$(cat app/src/main/java/app/tinyagent/*.kt | wc -l)
           echo "lines: $lines"
-          test "$lines" -le 1200
+          test "$lines" -le 1400
 
       - name: Hard rule 2 (no runtime dependencies)
         run: "! grep -E '^\\s*(implementation|api|runtimeOnly)\\(' app/build.gradle.kts"

@@ -61,7 +61,7 @@ class Phone : AccessibilityService(), Device, Ui {
         agent = a; apps = null; dims = null
         showPill()
         worker = Thread({
-            try { a.run(goal) } catch (e: Exception) { log("Crash: $e") } finally { agent = null; main.post { stopBtn?.text = "Close"; yesBtn?.visibility = View.GONE } }
+            try { a.run(goal) } catch (e: Exception) { log("Result (crash): $e") } finally { agent = null; main.post { stopBtn?.text = "Close"; yesBtn?.visibility = View.GONE } }
         }, "agent").also { it.start() }
         return true
     }

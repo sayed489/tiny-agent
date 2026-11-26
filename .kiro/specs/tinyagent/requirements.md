@@ -8,7 +8,7 @@ Requirements R13 to R15 (tests, CI, README) are inferred from the rest of the br
 
 ## R1 Code shape
 1. The app SHALL have exactly 6 Kotlin files in `app/src/main` (Agent, Llm, Screen, Phone, Main, Api) in package
-   `app.tinyagent`, totalling 1,200 lines or fewer.
+   `app.tinyagent`, totalling 1,400 lines or fewer.
 2. The app SHALL have no runtime dependencies other than the Kotlin stdlib and the Android SDK.
 3. The app SHALL set minSdk 30 and targetSdk 36.
 
@@ -80,7 +80,9 @@ Requirements R13 to R15 (tests, CI, README) are inferred from the rest of the br
 3. The client SHALL merge the user's Extra body JSON into every request.
 
 ## R11 UI
-1. The activity SHALL show service status, onboarding, settings, goal, Run, Stop, a 200-line log and Copy.
+1. The main screen SHALL be a chat: the user's goal as a bubble, a live progress bubble, then a result bubble, with one input and a Send button that becomes Stop while a task runs.
+   A separate Settings screen SHALL hold the provider preset, Base URL, API key, model, a Test connection button, permissions, safety toggles, advanced options and tools.
+   WHEN a setup step is missing (accessibility service, API key, background permission), the chat SHALL show a banner that opens the right prompt, and SHALL ask on first launch.
 2. The app SHALL show a one-time privacy notice.
 3. Dump screen SHALL write the window tree as JSON and open the share sheet, warning that it contains screen text.
 

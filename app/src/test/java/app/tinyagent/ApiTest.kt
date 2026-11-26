@@ -110,6 +110,29 @@ class ApiTest {
         assertTrue(!Endpoint(base, "sk-secret", "m").toString().contains("sk-secret"))
     }
 
+    @Test fun adaptsToNewerOpenAiModels() {
+        responses.addAll(listOf(
+            400 to """{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."}}""",
+            400 to """{"error":{"message":"Unsupported value: 'temperature' does not support 0.1 with this model."}}""",
+            200 to ok("OK"), 200 to ok("again")))
+        val api = OpenAiCompat(Endpoint(base, "k", "gpt-5-mini"), longArrayOf(1, 1))
+        assertEquals("OK", api.chat(listOf(Msg("user", "u")), 0.1, 24).text)
+        assertEquals(3, hits.size)
+        hits.last().body.let { assertTrue(it.getInt("max_completion_tokens") == 24 && !it.has("max_tokens") && !it.has("temperature")) }
+        assertEquals("again", api.chat(listOf(Msg("user", "u")), 0.1, 24).text) // learned: no failed round trips this time
+        assertEquals(4, hits.size)
+    }
+
+    @Test fun otherBadRequestsFailOnceWithTheProvidersMessage() {
+        responses.add(401 to """{"error":{"message":"Incorrect API key provided: sk-abc***."}}""")
+        try { OpenAiCompat(Endpoint(base, "sk-abc", "m"), longArrayOf(1, 1)).chat(listOf(Msg("user", "u")), 0.1, 24); fail() }
+        catch (e: ApiError) { assertEquals("HTTP 401 Incorrect API key provided: sk-abc***.", e.message); assertEquals(401, e.code) }
+        responses.add(400 to """{"error":{"message":"The model `nope` does not exist"}}""")
+        try { OpenAiCompat(Endpoint(base, "k", "nope"), longArrayOf(1, 1)).chat(listOf(Msg("user", "u")), 0.1, 24); fail() }
+        catch (e: ApiError) { assertTrue(e.message!!.contains("does not exist")) }
+        assertEquals(2, hits.size)
+    }
+
     @Test fun nullContentAndMissingUsage() {
         responses.add(200 to JSONObject().put("choices", listOf(mapOf("message" to mapOf("content" to JSONObject.NULL)))).toString())
         val r = OpenAiCompat(Endpoint(base, "k", "m")).chat(listOf(Msg("user", "u")), 0.1, 24)

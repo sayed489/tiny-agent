@@ -28,7 +28,7 @@ data class Endpoint(val baseUrl: String, val key: String, val model: String, val
 
 data class Msg(val role: String, val text: String, val jpeg: ByteArray? = null)
 data class Reply(val text: String, val promptTokens: Int, val completionTokens: Int, val ms: Long)
-class ApiError(msg: String, val retryable: Boolean) : Exception(msg)
+class ApiError(msg: String, val retryable: Boolean, val code: Int = 0) : Exception(msg)
 
 interface ChatApi {
     fun chat(msgs: List<Msg>, temperature: Double, maxTokens: Int, extra: Map<String, Any?> = emptyMap()): Reply
@@ -44,22 +44,35 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
     private val url = ep.baseUrl.trim().trimEnd('/').let { if (it.endsWith("/chat/completions")) it else "$it/chat/completions" }
     private val extraBody: JSONObject? = ep.extraBody.trim().takeIf { it.isNotEmpty() }?.let { JSONObject(it) }
 
+    // Learned from HTTP 400s: newer OpenAI models want max_completion_tokens and only the default temperature.
+    private var tokenKey = "max_tokens"; private var sendTemp = true
+
     override fun chat(msgs: List<Msg>, temperature: Double, maxTokens: Int, extra: Map<String, Any?>): Reply {
-        val body = JSONObject().put("model", ep.model).put("temperature", temperature).put("max_tokens", maxTokens)
-            .put("messages", JSONArray().also { a -> msgs.forEach { a.put(msgJson(it)) } })
-        extraBody?.let { e -> e.keys().forEach { body.put(it, e.get(it)) } }
-        extra.forEach { (k, v) -> body.put(k, json(v)) }
-        val bytes = body.toString().toByteArray()
         var attempt = 0
         while (true) {
+            val body = JSONObject().put("model", ep.model).put(tokenKey, maxTokens)
+                .put("messages", JSONArray().also { a -> msgs.forEach { a.put(msgJson(it)) } })
+            if (sendTemp) body.put("temperature", temperature)
+            extraBody?.let { e -> e.keys().forEach { body.put(it, e.get(it)) } }
+            extra.forEach { (k, v) -> body.put(k, json(v)) }
             try {
-                return post(bytes)
+                return post(body.toString().toByteArray())
             } catch (e: ApiError) {
+                if (e.code == 400 && adapt(e.message.orEmpty())) continue
                 if (!e.retryable || attempt >= waits.size) throw e
                 Thread.sleep(waits[attempt++])
             }
         }
     }
+
+    private fun adapt(m: String) = when {
+        tokenKey == "max_tokens" && m.contains("max_completion_tokens") -> { tokenKey = "max_completion_tokens"; true }
+        sendTemp && m.contains("temperature") -> { sendTemp = false; true }
+        else -> false
+    }
+
+    /** The provider's own error message when the body is OpenAI-style JSON, else the raw text. */
+    private fun errText(t: String) = try { JSONObject(t).getJSONObject("error").getString("message") } catch (e: JSONException) { t }.trim().take(200)
 
     private fun post(bytes: ByteArray): Reply {
         val t0 = System.currentTimeMillis()
@@ -68,12 +81,10 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
             c.connectTimeout = 10_000; c.readTimeout = 30_000; c.requestMethod = "POST"; c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
             if (ep.key.isNotBlank()) c.setRequestProperty("Authorization", "Bearer ${ep.key}")
-            c.setFixedLengthStreamingMode(bytes.size)
             c.outputStream.use { it.write(bytes) }
             val code = c.responseCode
             val text = (if (code < 400) c.inputStream else c.errorStream)?.use { it.readBytes().decodeToString() } ?: ""
-            if (code == 429 || code >= 500) throw ApiError("HTTP $code ${text.take(160)}", true)
-            if (code >= 400) throw ApiError("HTTP $code ${text.take(160)}", false)
+            if (code >= 400) throw ApiError("HTTP $code ${errText(text)}", code == 429 || code >= 500, code)
             val j = JSONObject(text)
             val m = j.getJSONArray("choices").getJSONObject(0).optJSONObject("message")
             val content = if (m == null || m.isNull("content")) "" else m.getString("content")

@@ -17,6 +17,7 @@ object RunLog {
         listener?.invoke()
     }
     fun text(): String = synchronized(this) { lines.joinToString("\n") }
+    fun clear() { synchronized(this) { lines.clear() }; listener?.invoke() }
 }
 
 class Halt(val status: String, why: String) : Exception(why)
@@ -42,7 +43,7 @@ class Agent(
         try {
             if (dev.locked()) throw Halt("locked", "Unlock the phone first")
             dev.size().let { w = it.first; h = it.second }
-            ui.log("Goal: $goal"); ui.status("Planning…")
+            ui.status("Planning…") // the "Goal:" log line is written by the chat screen
             dev.key("home"); dev.settle()
             var plan = newPlan(goal)
             var k = 0; var fresh = false
