@@ -29,7 +29,7 @@ class ApiTest {
                     val head = readHead(inp).split("\r\n")
                     val headers = head.drop(1).associate { h -> h.substringBefore(':').lowercase() to h.substringAfter(':').trim() }
                     val body = ByteArray(headers["content-length"]?.toInt() ?: 0).also { b -> var o = 0; while (o < b.size) o += inp.read(b, o, b.size - o) }
-                    hits += Hit(head[0].split(' ')[1], headers["authorization"], JSONObject(body.decodeToString()))
+                    hits += Hit(head[0].split(' ')[1], headers["authorization"], if (body.isEmpty()) JSONObject() else JSONObject(body.decodeToString()))
                     val (code, text) = responses.pollFirst() ?: (200 to ok("fallback"))
                     val bytes = text.toByteArray()
                     it.getOutputStream().apply {
@@ -182,6 +182,29 @@ class ApiTest {
         responses.add(404 to "not found")
         try { OpenAiCompat(Endpoint(base, "", "m"), longArrayOf(1, 1)).chat(listOf(Msg("user", "u")), 0.1, 8); fail() }
         catch (e: ApiError) { assertTrue(e.message!!.contains("Base URL")) }
+    }
+
+    @Test fun pastedUrlsAreCleaned() {
+        val v1 = "https://api.liquid.ai/openai/v1"
+        for (raw in listOf(v1, "$v1/", " $v1 \n", "$v1/chat/completions", "api.liquid.ai/openai/v1", "base_url=\"$v1\",", "baseURL: \"$v1\",", "'$v1'", "curl $v1/models -H x"))
+            assertEquals(raw, v1, cleanBaseUrl(raw))
+        assertEquals("http://192.168.1.20:8080/v1", cleanBaseUrl("192.168.1.20:8080/v1"))
+        assertEquals("http://localhost:11434/v1", cleanBaseUrl("localhost:11434/v1"))
+        assertEquals("", cleanBaseUrl("  ")); assertEquals("https://host", cleanBaseUrl("https://host/"))
+        assertEquals("liquid_abc", cleanKey("  \"liquid_abc\" ")); assertEquals("sk-1", cleanKey("Bearer sk-1"))
+    }
+
+    @Test fun sendsTheRightUrlAndCleanKeyForAPastedLine() {
+        responses.add(200 to ok("OK"))
+        OpenAiCompat(Endpoint("base_url=\"$base/\"", "\"Bearer k1\"", "m")).chat(listOf(Msg("user", "u")), 0.1, 8)
+        assertEquals("/v1/chat/completions", hits.single().path); assertEquals("Bearer k1", hits.single().auth)
+    }
+
+    @Test fun listsModelsFromTheServer() {
+        responses.add(200 to """{"data":[{"id":"lfm3-1.7b"},{"id":"lfm3-vl-2b"}]}""")
+        assertEquals(listOf("lfm3-1.7b", "lfm3-vl-2b"), OpenAiCompat(Endpoint(base, "k", "m")).models())
+        assertEquals("/v1/models", hits.single().path)
+        server.close(); assertEquals(emptyList<String>(), OpenAiCompat(Endpoint(base, "k", "m")).models())
     }
 
     @Test fun nullContentAndMissingUsage() {

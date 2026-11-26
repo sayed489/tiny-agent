@@ -28,5 +28,6 @@ Waves run in order. Tasks inside a wave are independent: each edits only its own
 - [x] 5.7a Chat UI, settings screen, permission prompts, adaptive app icon, OpenAI max_completion_tokens/temperature adaptation (v0.2.0)
 - [x] 5.7b v0.2.1 planning fix: reasoning-model budget + reasoning_effort, plans with ->/→ arrows or plain lists, direct answers ("answer:"), looser tap labels, New chat, visible warnings, latest plan only
 - [x] 5.7c v0.2.2 provider-neutral settings (any OpenAI-compatible API), vision-language model toggle, Test connection runs a real PLAN + ACT probe, lenient tiny-model reply parsing, Base URL without /v1
+- [x] 5.7d v0.2.3 pasted Base URL/key cleaning, Liquid AI shortcut (lfm3-vl-2b), model list shown on a wrong model name
 - [ ] 5.6 Manual on-device test: onboarding, the 3 sample goals, volume-down kill switch, vision fallback (needs a phone)
 - [ ] 5.7 Open a PR (needs a GitHub repository; none was provided)

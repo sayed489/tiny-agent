@@ -26,8 +26,21 @@ data class Msg(val role: String, val text: String, val jpeg: ByteArray? = null)
 data class Reply(val text: String, val promptTokens: Int, val completionTokens: Int, val ms: Long)
 class ApiError(msg: String, val retryable: Boolean, val code: Int = 0) : Exception(msg)
 
+/** Accepts what people paste: a URL, "host/v1" without https://, the full .../chat/completions URL, or a code line like base_url="https://host/v1",. */
+fun cleanBaseUrl(raw: String): String {
+    var s = raw.trim()
+    val i = listOf(s.indexOf("http://"), s.indexOf("https://")).filter { it >= 0 }.minOrNull() ?: -1
+    s = if (i >= 0) s.substring(i).takeWhile { !it.isWhitespace() && it !in "\"'`,;)" } else s.trim('"', '\'', '`', ',', ';', ')', ' ').let {
+        if (it.isEmpty()) it else if (it.startsWith("localhost") || it[0].isDigit()) "http://$it" else "https://$it" }
+    return s.trimEnd('/').removeSuffix("/chat/completions").removeSuffix("/models").trimEnd('/')
+}
+/** An API key as pasted: no quotes, spaces or "Bearer " prefix. */
+fun cleanKey(raw: String) = raw.trim().trim('"', '\'', '`').trim().removePrefix("Bearer ").trim()
+
 interface ChatApi {
     fun chat(msgs: List<Msg>, temperature: Double, maxTokens: Int, extra: Map<String, Any?> = emptyMap()): Reply
+    /** Model ids this endpoint offers (GET /models), or empty when unknown. Used to help when the model name is wrong. */
+    fun models(): List<String> = emptyList()
 
     companion object {
         /** The single switch point: swap the implementation here to detach from OpenAI-compatible HTTP. */
@@ -37,7 +50,7 @@ interface ChatApi {
 
 /** OpenAI-compatible POST {baseUrl}/chat/completions. Keep-alive is reused across calls for speed. */
 class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = longArrayOf(1000, 3000)) : ChatApi {
-    private val base = ep.baseUrl.trim().trimEnd('/').removeSuffix("/chat/completions")
+    private val base = cleanBaseUrl(ep.baseUrl); private val key = cleanKey(ep.key)
     private var url = "$base/chat/completions"; private var triedV1 = false
     private val extraBody: JSONObject? = ep.extraBody.trim().takeIf { it.isNotEmpty() }?.let { JSONObject(it) }
 
@@ -85,6 +98,14 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
         else -> false
     }
 
+    override fun models(): List<String> = try {
+        val c = URL("$base/models").openConnection() as HttpURLConnection
+        c.connectTimeout = 10_000; c.readTimeout = 15_000
+        if (key.isNotBlank()) c.setRequestProperty("Authorization", "Bearer $key")
+        val a = JSONObject(c.inputStream.use { it.readBytes().decodeToString() }).getJSONArray("data")
+        (0 until a.length()).map { a.getJSONObject(it).getString("id") }
+    } catch (e: Exception) { emptyList() }
+
     /** The provider's own error message when the body is OpenAI-style JSON, else the raw text. */
     private fun errText(t: String) = try { JSONObject(t).getJSONObject("error").getString("message") } catch (e: JSONException) { t }.trim().take(200)
 
@@ -95,7 +116,7 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
             val c = URL(url).openConnection() as HttpURLConnection
             c.connectTimeout = 10_000; c.readTimeout = readMs; c.requestMethod = "POST"; c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
-            if (ep.key.isNotBlank()) c.setRequestProperty("Authorization", "Bearer ${ep.key}")
+            if (key.isNotBlank()) c.setRequestProperty("Authorization", "Bearer $key")
             c.outputStream.use { it.write(bytes) }
             val code = c.responseCode
             val text = (if (code < 400) c.inputStream else c.errorStream)?.use { it.readBytes().decodeToString() } ?: ""

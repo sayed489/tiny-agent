@@ -163,7 +163,7 @@ class Main : Activity() {
 /** Settings screen: model + API key first, then permissions, behaviour, advanced options and tools. */
 class Options : Activity() {
     /** Shortcuts that only fill in the Base URL. Any other OpenAI-compatible endpoint works with "Any provider". */
-    private val presets = listOf("Any OpenAI-compatible provider" to "", "OpenAI" to "https://api.openai.com/v1", "OpenRouter" to "https://openrouter.ai/api/v1",
+    private val presets = listOf("Any OpenAI-compatible provider" to "", "Liquid AI" to "https://api.liquid.ai/openai/v1", "OpenAI" to "https://api.openai.com/v1", "OpenRouter" to "https://openrouter.ai/api/v1",
         "Groq" to "https://api.groq.com/openai/v1", "Together AI" to "https://api.together.xyz/v1", "Ollama (your PC)" to "http://192.168.1.10:11434/v1",
         "LM Studio (your PC)" to "http://192.168.1.10:1234/v1", "llama.cpp server (your PC)" to "http://192.168.1.10:8080/v1", "vLLM (your server)" to "http://192.168.1.10:8000/v1")
     private val f = LinkedHashMap<String, EditText>(); private val sw = LinkedHashMap<String, Switch>()
@@ -179,12 +179,16 @@ class Options : Activity() {
         }
         head("AI model"); note("Works with any OpenAI-compatible chat API, cloud or your own server, including tiny models such as Liquid LFM2-VL. Pick a shortcut or type your own Base URL.")
         val sp = Spinner(this).apply { adapter = ArrayAdapter(this@Options, android.R.layout.simple_spinner_dropdown_item, presets.map { it.first }) }
-        var last = presets.indexOfFirst { it.second == Store.get(this, "url") }.coerceAtLeast(0)
+        var last = presets.indexOfFirst { it.second == cleanBaseUrl(Store.get(this, "url")) }.coerceAtLeast(0)
         sp.setSelection(last)
         sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, i: Int, id: Long) {
                 if (i == last) return else last = i
                 presets[i].second.takeIf { it.isNotEmpty() }?.let { f.getValue("url").setText(it) }
+                if (presets[i].first == "Liquid AI") { // Liquid's documented defaults for their models
+                    if (f.getValue("model").text.isBlank()) f.getValue("model").setText("lfm3-vl-2b")
+                    if (f.getValue("extra").text.isBlank()) f.getValue("extra").setText("{\"top_k\":50,\"repetition_penalty\":1.1}")
+                }
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
@@ -238,7 +242,10 @@ class Options : Activity() {
                 "✓ Connected (${p.ms + a.ms} ms)\nPlan: " + (if (steps.isEmpty()) "✗ could not read ${raw(p.text)}" else steps.joinToString(" › ") { it.doing.ifEmpty { "answer" } }) +
                     "\nAction: " + (cmd.first?.let { "✓ $it" } ?: "✗ could not read ${raw(a.text)} (${cmd.second})") +
                     if ((api as? OpenAiCompat)?.thinks == true) "\nThis is a reasoning model: it works, but each step is slower." else ""
-            } catch (e: Exception) { "✗ ${e.message}" }
+            } catch (e: Exception) {
+                val ids = if (e is ApiError && e.code in listOf(400, 404, 422)) try { ChatApi.create(Endpoint(v("url"), v("key"), v("model"), v("extra"))).models() } catch (x: Exception) { emptyList() } else emptyList()
+                "✗ ${e.message}" + if (ids.isEmpty()) "" else "\nModel names you can use: " + ids.take(15).joinToString(", ")
+            }
             runOnUiThread { out.text = r }
         }.start()
     }
@@ -275,7 +282,7 @@ object Store {
     fun setFlag(c: Context, k: String, v: Boolean) = p(c).edit().putBoolean(k, v).apply()
     /** What is still missing before a task can run, or null when ready. */
     fun problem(c: Context): String? {
-        val url = get(c, "url").trim(); val extra = get(c, "extra").trim()
+        val url = cleanBaseUrl(get(c, "url")); val extra = get(c, "extra").trim()
         return when {
             url.isEmpty() || get(c, "model").isBlank() -> "Add your AI model in Settings"
             get(c, "key").isBlank() && !url.startsWith("http://") -> "Add your API key in Settings"

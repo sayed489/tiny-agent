@@ -5,7 +5,7 @@ inclusion: always
 1. app/src/main has exactly 6 Kotlin files: Agent.kt, Llm.kt, Screen.kt, Phone.kt, Main.kt, plus Api.kt
    (package app.tinyagent). Api.kt is the detachable model transport: the only file that talks HTTP to a model server.
    Not counted: Gradle files and wrapper, AndroidManifest.xml, res/xml/agent_service.xml, res/values/strings.xml,
-   .github/workflows/build.yml, src/test/**. Main code is 1,450 lines or fewer in total (raised from 1,200 for the chat UI, settings screen, permission flow and model self-test).
+   .github/workflows/build.yml, src/test/**. Main code is 1,450 lines or fewer in total (raised from 1,200 for the chat UI, settings screen, permission flow, model self-test and URL cleaning).
    Main.kt holds the chat screen (Main), the settings screen (Options) and saved settings (Store).
    Icon and theme resources under res/ are not counted.
 2. Runtime dependencies: Kotlin stdlib and the Android SDK only (HttpURLConnection, org.json, Views built in code).
