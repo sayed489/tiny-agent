@@ -111,6 +111,34 @@ class LlmTest {
         assertTrue(parsePlan("I cannot help").isEmpty())
     }
 
+    @Test fun planArrowsListsAndAnswers() {
+        assertEquals(listOf(Step("open YouTube", "YouTube is open", false), Step("search Mr Indian Hacker", "the channel is shown", false)),
+            parsePlan("1. open YouTube -> YouTube is open\n2. search Mr Indian Hacker → the channel is shown"))
+        val list = parsePlan("Steps:\n1. Open YouTube\n2. !Order a brush on Amazon\nDone.")
+        assertEquals(listOf("Open YouTube", "Order a brush on Amazon"), list.map { it.doing })
+        assertTrue(list[1].risky)
+        assertEquals("Open YouTube is done", list[0].doneWhen)
+        assertEquals(listOf(Step("", "Hi! What should I do on your phone?", false)), parsePlan("answer: Hi! What should I do on your phone?"))
+        assertEquals(listOf(Step("", "Hello!", false)), parsePlan("<think>greeting</think>\nAnswer: Hello!"))
+        assertEquals("open X", parsePlan("open X => X is open\nanswer: hi").single().doing) // steps win over an answer
+    }
+
+    @Test fun planFallbackIsLogged() {
+        val logs = ArrayList<String>()
+        Llm(FakeApi(""), log = { logs += it }).plan("Go to YouTube", emptyList(), "App: none | popup: no | keyboard: no")
+        assertTrue(logs.toString(), logs.any { it.startsWith("⚠ Could not read the model's plan (empty reply)") })
+    }
+
+    @Test fun looseTapLabels() {
+        ok("tap on Voice search", Cmd.Tap(2))
+        ok("tap the Voice search button", Cmd.Tap(2)) // "Search" is inside too, but the longest label wins
+        ok("tap voice", Cmd.Tap(2))
+        bad("tap the Send button") // two Send buttons: still ambiguous
+        bad("tap on it")
+    }
+
+    @Test fun planPrefixStillWithinBudget() { assertTrue(Screen.tokens(Prompts.PLAN) <= 150) }
+
     @Test fun planRetriesThenFallsBack() {
         val api = FakeApi("sure!", "still no plan")
         val plan = Llm(api).plan("weather in Tokyo", emptyList(), "App: Launcher | popup: no | keyboard: no")

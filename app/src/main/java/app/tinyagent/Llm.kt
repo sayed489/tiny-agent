@@ -1,6 +1,7 @@
 // Llm.kt: the 5 prompt builders, token budgeting, reply parser and plan parser. Transport lives in Api.kt.
 package app.tinyagent
 
+/** One plan step. A step with an empty [doing] is the planner's direct answer (no phone action), held in [doneWhen]. */
 data class Step(val doing: String, val doneWhen: String, val risky: Boolean)
 
 sealed class Cmd {
@@ -26,10 +27,11 @@ class Usage { @Volatile var calls = 0; @Volatile var maxPrompt = 0; @Volatile va
 object Prompts {
     const val PLAN = "You plan phone tasks. Write 1 to 6 steps, one per line:\n" +
         "<action> => <what the screen shows when it is done>\n" +
-        "Describe results, not exact buttons. Use the app the user named. If no app is named or it is missing, use a website.\n" +
-        "Start a line with ! if it sends, posts, buys, books or deletes something.\n" +
-        "The last step must show the result on screen.\n" +
-        "Example task: weather in Paris\n" +
+        "One step per part of the task. Describe results, not buttons.\n" +
+        "Use the app the user named, else a website.\n" +
+        "Start a line with ! if it sends, posts, buys, orders or deletes.\n" +
+        "If no phone action is needed, write only: answer: <reply>\n" +
+        "Example: weather in Paris\n" +
         "open google.com => Google is open\n" +
         "search weather Paris => weather results are shown\n" +
         "read the temperature => Paris temperature is visible"
@@ -61,9 +63,11 @@ class Llm(
     override fun plan(goal: String, facts: List<String>, screen: String): List<Step> {
         val f = facts.joinToString("; ").ifEmpty { "none" }
         val user = fit(Prompts.PLAN, screen) { "Task: $goal\nFacts: $f\nScreen now:\n$it" }
-        return parsePlan(send("PLAN", planApi, Prompts.PLAN, user, 0.3, 150))
-            .ifEmpty { parsePlan(send("PLAN", planApi, Prompts.PLAN, user, 0.5, 150)) }
-            .ifEmpty { listOf(Step(goal, "the goal is done", false)) }
+        var r = send("PLAN", planApi, Prompts.PLAN, user, 0.3, 150)
+        return parsePlan(r).ifEmpty { r = send("PLAN", planApi, Prompts.PLAN, user, 0.5, 150); parsePlan(r) }.ifEmpty {
+            log("⚠ Could not read the model's plan " + if (r.isBlank()) "(empty reply)" else "“${r.replace('\n', ' ').take(80)}”")
+            listOf(Step(goal, "the goal is done", false))
+        }
     }
 
     override fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String): String {
@@ -112,7 +116,6 @@ private val VERBS = setOf("open", "tap", "type", "scroll", "key")
 private val ALIAS = mapOf("click" to "tap", "press" to "key", "swipe" to "scroll", "launch" to "open", "input" to "type")
 private val DIRS = setOf("down", "up", "left", "right")
 private val KEYS = setOf("back", "home", "enter", "notifications")
-
 /** Drop <think>...</think> (and a dangling </think>), return the first non-empty line. */
 fun firstLine(reply: String): String {
     var s = reply
@@ -138,7 +141,6 @@ fun cleanLine(line: String): String {
 
 private fun unq(s: String) = s.trim().trim('"', '\'', '“', '”', '`').trim()
 private fun word(s: String) = unq(s).trimEnd('.', '!', ',', ';').lowercase()
-
 fun parse(reply: String, items: List<Item>, maxMark: Int = 0): Pair<Cmd?, String?> {
     val line = cleanLine(firstLine(reply))
     if (line.isEmpty()) return null to "empty reply"
@@ -149,13 +151,21 @@ fun parse(reply: String, items: List<Item>, maxMark: Int = 0): Pair<Cmd?, String
     if (verb !in VERBS) return null to "unknown command $v0"
     fun idOf(tok: String): Int? = tok.trim('[', ']', '(', ')', '#', '.', ',').toIntOrNull()
     fun valid(id: Int) = if (maxMark > 0) id in 1..maxMark else items.any { it.id == id }
-    fun byLabel(s: String, pool: List<Item>): Int? =
-        pool.filter { it.label.equals(unq(s), ignoreCase = true) }.singleOrNull()?.id
+    /** Exact unique label; with [loose], also "tap on the X button" (longest label inside) or "tap Voice" (unique prefix). */
+    fun byLabel(s: String, pool: List<Item>, loose: Boolean = false): Int? {
+        val q = unq(s).lowercase()
+        pool.filter { it.label.equals(q, ignoreCase = true) }.singleOrNull()?.let { return it.id }
+        if (!loose || q.length < 3) return null
+        val inside = pool.filter { it.label.length >= 3 && q.contains(it.label.lowercase()) }
+        val top = inside.filter { it.label.length == inside.maxOfOrNull { i -> i.label.length } }
+        if (top.isNotEmpty()) return top.singleOrNull()?.id
+        return pool.filter { it.label.lowercase().startsWith(q) }.singleOrNull()?.id
+    }
     return when (verb) {
         "open" -> unq(rest).trimEnd('.').let { if (it.isEmpty()) null to "open needs an app or website" else Cmd.Open(it) to null }
         "scroll" -> word(rest).let { if (it in DIRS) Cmd.Scroll(it) to null else null to "scroll needs down, up, left or right" }
         "key" -> word(rest).let { if (it in KEYS) Cmd.Key(it) to null else null to "key needs back, home, enter or notifications" }
-        "tap" -> when (val id = idOf(rest.substringBefore(' ')) ?: (if (maxMark == 0) byLabel(rest, items) else null)) {
+        "tap" -> when (val id = idOf(rest.substringBefore(' ')) ?: (if (maxMark == 0) byLabel(rest, items, loose = true) else null)) {
             null -> null to "tap needs an id from Screen"
             else -> if (valid(id)) Cmd.Tap(id) to null else null to "no id $id on Screen"
         }
@@ -177,19 +187,23 @@ fun parse(reply: String, items: List<Item>, maxMark: Int = 0): Pair<Cmd?, String
     }
 }
 
-/** Keep lines with "=>", strip numbering/bullets, "!" marks risky, at most 6 steps. */
+private val ARROWS = listOf("=>", "->", "→", "⇒")
+/**
+ * Plan lines are "<action> => <done when>" (also ->, →, ⇒), with numbering and bullets stripped and "!" marking risky.
+ * A list without arrows still becomes steps. A lone "answer: …" line means no phone action is needed. At most 6 steps.
+ */
 fun parsePlan(reply: String): List<Step> {
-    var s = reply
-    val e = s.lastIndexOf("</think>")
-    if (e >= 0) s = s.substring(e + 8)
-    return s.lines().mapNotNull { raw ->
-        val l = cleanLine(raw)
-        val i = l.indexOf("=>")
-        if (i <= 0) return@mapNotNull null
-        var a = l.substring(0, i).trim()
-        val risky = a.startsWith("!")
-        a = a.trimStart('!').trim()
-        val b = l.substring(i + 2).trim().trimEnd('.')
-        if (a.isEmpty() || b.isEmpty()) null else Step(a, b, risky)
-    }.take(6)
+    val raw = reply.substringAfterLast("</think>").lines().map { it.trim() }.filter { it.isNotEmpty() }
+    fun step(line: String, done: String?): Step? {
+        val a = line.trim().trimStart('!').trim()
+        return if (a.isEmpty()) null else Step(a, (done ?: "$a is done").trim().trimEnd('.'), line.trim().startsWith("!"))
+    }
+    val arrowed = raw.map(::cleanLine).mapNotNull { l ->
+        val arrow = ARROWS.map { l.indexOf(it) to it.length }.filter { it.first > 0 }.minByOrNull { it.first } ?: return@mapNotNull null
+        l.substring(arrow.first + arrow.second).trim().takeIf { it.isNotEmpty() }?.let { step(l.substring(0, arrow.first), it) }
+    }
+    if (arrowed.isNotEmpty()) return arrowed.take(6)
+    raw.map(::cleanLine).firstOrNull { it.startsWith("answer:", ignoreCase = true) }
+        ?.let { a -> return listOf(Step("", a.substringAfter(':').trim().ifEmpty { "OK" }, false)) }
+    return raw.filter { it[0].isDigit() || it[0] in "-*•" }.mapNotNull { step(cleanLine(it), null) }.take(6)
 }

@@ -3,8 +3,7 @@ package app.tinyagent
 
 import android.app.*
 import android.content.*
-import android.graphics.Color
-import android.graphics.Typeface
+import android.graphics.*
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.*
@@ -67,13 +66,13 @@ class Main : Activity() {
     private lateinit var msgs: LinearLayout; private lateinit var scroll: ScrollView; private lateinit var input: EditText
     private lateinit var go: Button; private lateinit var banner: TextView; private lateinit var sub: TextView
     private var busy = false; private var bannerAct: () -> Unit = {}
-
     override fun onCreate(s: Bundle?) {
         super.onCreate(s)
         sub = tv("", 12f, GREY)
         val bar = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL; setPadding(dp(16), dp(8), dp(8), dp(8)); setBackgroundColor(Color.WHITE)
             addView(LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; addView(tv("TinyAgent", 20f, bold = true)); addView(sub) }, lp(0, -2, 1f))
+            addView(btn("New chat", Color.TRANSPARENT, ACCENT) { if (busy) toast("Stop the running task first") else RunLog.clear() })
             addView(btn("Settings", Color.TRANSPARENT, ACCENT) { startActivity(Intent(this@Main, Options::class.java)) })
         }
         banner = tv("", 13f, 0xFF5F4300.toInt()).apply {
@@ -101,7 +100,6 @@ class Main : Activity() {
 
     override fun onResume() { super.onResume(); RunLog.listener = { runOnUiThread { render() } }; refresh() }
     override fun onPause() { super.onPause(); RunLog.listener = null }
-
     private fun refresh() {
         val prob = Store.problem(this); val svc = Phone.instance != null
         if (svc && prob == null && !batteryOk() && !Store.flag(this, "askedBattery", false)) { Store.setFlag(this, "askedBattery", true); askBattery() }
@@ -125,20 +123,22 @@ class Main : Activity() {
         if (!phone.start(goal, Store.config(this))) RunLog.add("Result (error): Could not start")
     }
 
-    /** Rebuilds the chat from the shared run log: your goal, a progress bubble while working, then the result. */
+    /** Rebuilds the chat from the shared run log: your goal, one progress bubble (latest plan + actions), then the result. */
     private fun render() {
         msgs.removeAllViews(); busy = false
-        var steps = ArrayList<String>()
-        fun flush() { if (steps.isNotEmpty()) msgs.addView(bubble(steps.joinToString("\n"), false, 0xFFE9EAF2.toInt(), 13f)); steps = ArrayList() }
+        var steps = ArrayList<String>(); var replan = ""
+        fun flush() { if (steps.isNotEmpty()) msgs.addView(bubble((listOf(replan) + steps).filter { it.isNotEmpty() }.joinToString("\n"), false, 0xFFE9EAF2.toInt(), 13f)); steps = ArrayList(); replan = "" }
         for (l in RunLog.text().lines()) when {
             l.startsWith("Goal: ") -> { flush(); msgs.addView(bubble(l.drop(6), true)); busy = true }
             l.startsWith("Result (") -> {
                 flush(); busy = false
                 val st = l.substringBefore("): ").drop(8)
-                msgs.addView(bubble(l.substringAfter("): "), false, when { st == "done" -> 0xFFDDF5E4.toInt(); st == "stopped" -> Color.WHITE; else -> 0xFFFDE7E7.toInt() }))
+                msgs.addView(bubble(l.substringAfter("): "), false, when (st) { "done" -> 0xFFDDF5E4.toInt(); "stopped", "answered" -> Color.WHITE; else -> 0xFFFDE7E7.toInt() }))
             }
+            l.startsWith("↻ ") -> { steps = ArrayList(); replan = l } // a replan replaces the old plan in the bubble
             l.startsWith("Plan ") -> steps += "${l.substring(5, l.indexOf(':'))}. ${l.substringAfter(": ").substringBefore(" =>")}"
             l.startsWith("→ ") -> steps += "· " + l.drop(2)
+            l.startsWith("⚠ ") && steps.lastOrNull() != l -> steps += l
             l.startsWith("✓ ") || l.startsWith("Asked") || l.startsWith("API error") || l.startsWith("Volume") -> steps += l
         }
         if (busy) steps += "…"
@@ -169,7 +169,6 @@ class Options : Activity() {
     private val f = LinkedHashMap<String, EditText>(); private val sw = LinkedHashMap<String, Switch>()
     private lateinit var col: LinearLayout; private lateinit var adv: LinearLayout
     private lateinit var a11y: TextView; private lateinit var bat: TextView; private lateinit var out: TextView
-
     override fun onCreate(s: Bundle?) {
         super.onCreate(s)
         col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(4), dp(16), dp(32)) }
@@ -178,16 +177,15 @@ class Options : Activity() {
             gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), dp(8), dp(8), dp(8)); setBackgroundColor(Color.WHITE)
             addView(btn("‹ Back", Color.TRANSPARENT, ACCENT) { finish() }); addView(tv("Settings", 18f, bold = true))
         }
-        head("AI model"); note("Works with any OpenAI-compatible API. Small, fast chat models work best, for example gpt-4o-mini or llama-3.1-8b-instant. Avoid “reasoning” models.")
+        head("AI model"); note("Works with any OpenAI-compatible API. Fast chat models work best, for example gpt-4o-mini or llama-3.1-8b-instant. Reasoning models (gpt-5, o-series) work too, but each step is slower.")
         val sp = Spinner(this).apply { adapter = ArrayAdapter(this@Options, android.R.layout.simple_spinner_dropdown_item, presets.map { it.first }) }
         var last = presets.indexOfFirst { it.second == Store.get(this, "url") }.let { if (it < 0) presets.lastIndex else it }
         sp.setSelection(last)
         sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, i: Int, id: Long) {
-                if (i == last) return
-                last = i
-                if (presets[i].second.isNotEmpty()) f.getValue("url").setText(presets[i].second)
-                if (presets[i].third.isNotEmpty()) f.getValue("model").setText(presets[i].third)
+                if (i == last) return else last = i
+                presets[i].second.takeIf { it.isNotEmpty() }?.let { f.getValue("url").setText(it) }
+                presets[i].third.takeIf { it.isNotEmpty() }?.let { f.getValue("model").setText(it) }
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
@@ -196,14 +194,11 @@ class Options : Activity() {
         field("model", "Model", "gpt-4o-mini")
         out = note("")
         col.put(btn("Test connection") { testConnection() }); col.put(out)
-
         head("Permissions")
         a11y = note(""); col.put(a11y); col.put(btn("Turn on accessibility service") { askService() })
         bat = note(""); col.put(bat); col.put(btn("Allow background activity") { askBattery() })
-
         head("Safety")
         toggle("risky", "Ask before sending, buying, posting or deleting", true); toggle("every", "Ask before every step", false)
-
         col.put(btn("Advanced ▾", Color.WHITE, ACCENT) { adv.visibility = if (adv.visibility == View.GONE) View.VISIBLE else View.GONE }.apply { background = shape(Color.WHITE, 22, LINE) })
         col.addView(adv)
         head("Advanced", adv); note("For your own servers. Qwen3 models: set Extra body to {\"chat_template_kwargs\":{\"enable_thinking\":false}}.", adv)
@@ -211,12 +206,10 @@ class Options : Activity() {
         field("vurl", "Vision base URL (optional)", "", into = adv); field("vkey", "Vision API key", "", masked = true, into = adv)
         field("vmodel", "Vision model", "", into = adv); field("img", "Vision image size", "352x768", def = "352x768", into = adv)
         toggle("yn", "Constrain CHECK to Y/N (vLLM only)", false, adv)
-
         head("Tools")
         col.put(btn("Copy debug log", Color.WHITE, ACCENT) {
             getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("log", RunLog.text())); toast("Log copied")
         }.apply { background = shape(Color.WHITE, 22, LINE) })
-        col.put(btn("Clear chat", Color.WHITE, ACCENT) { RunLog.clear(); toast("Chat cleared") }.apply { background = shape(Color.WHITE, 22, LINE) })
         col.put(btn("Dump screen for bug reports", Color.WHITE, ACCENT) { dump() }.apply { background = shape(Color.WHITE, 22, LINE) })
         frame(LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(bar); addView(ScrollView(context).apply { addView(col) }, lp(-1, 0, 1f)) })
     }
@@ -227,18 +220,18 @@ class Options : Activity() {
         bat.text = "Background activity: " + if (batteryOk()) "allowed ✓" else "not allowed (some phones stop the service)"
     }
 
-    override fun onPause() {
-        super.onPause()
-        f.forEach { (k, e) -> Store.put(this, k, e.text.toString().trim()) }; sw.forEach { (k, s) -> Store.setFlag(this, k, s.isChecked) }
-    }
+    override fun onPause() { super.onPause(); f.forEach { (k, e) -> Store.put(this, k, e.text.toString().trim()) }; sw.forEach { (k, s) -> Store.setFlag(this, k, s.isChecked) } }
 
     private fun testConnection() {
         val v = { k: String -> f.getValue(k).text.toString().trim() }
         out.text = "Testing…"
         Thread {
             val r = try {
-                val a = ChatApi.create(Endpoint(v("url"), v("key"), v("model"), v("extra"))).chat(listOf(Msg("user", "Reply with the word OK")), 0.1, 8)
-                "✓ Connected in ${a.ms} ms. The model said: " + a.text.trim().take(40).ifEmpty { "(nothing; a reasoning model?)" }
+                val api = ChatApi.create(Endpoint(v("url"), v("key"), v("model"), v("extra")))
+                val a = api.chat(listOf(Msg("user", "Reply with the word OK")), 0.1, 8)
+                val slow = (api as? OpenAiCompat)?.thinks == true
+                "✓ Connected in ${a.ms} ms. The model said: " + a.text.substringAfterLast("</think>").trim().take(40).ifEmpty { "(nothing)" } +
+                    if (slow) "\nThis is a reasoning model: it works, but every step is slower. A non-reasoning model (for example gpt-4o-mini) is much faster." else ""
             } catch (e: Exception) { "✗ ${e.message}" }
             runOnUiThread { out.text = r }
         }.start()
@@ -274,7 +267,6 @@ object Store {
     fun put(c: Context, k: String, v: String) = p(c).edit().putString(k, if (k in secret) enc(v) else v).apply()
     fun flag(c: Context, k: String, def: Boolean) = p(c).getBoolean(k, def)
     fun setFlag(c: Context, k: String, v: Boolean) = p(c).edit().putBoolean(k, v).apply()
-
     /** What is still missing before a task can run, or null when ready. */
     fun problem(c: Context): String? {
         val url = get(c, "url").trim(); val extra = get(c, "extra").trim()
@@ -304,11 +296,8 @@ object Store {
         return g.generateKey()
     }
 
-    private fun enc(s: String): String {
-        if (s.isEmpty()) return ""
-        val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, ksKey()) }
-        return Base64.encodeToString(c.iv + c.doFinal(s.toByteArray()), Base64.NO_WRAP) // 12-byte IV + ciphertext
-    }
+    private fun enc(s: String): String = if (s.isEmpty()) "" else Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, ksKey()) }
+        .let { c -> Base64.encodeToString(c.iv + c.doFinal(s.toByteArray()), Base64.NO_WRAP) } // 12-byte IV + ciphertext
     private fun dec(s: String): String = try {
         val b = Base64.decode(s, Base64.NO_WRAP)
         val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, ksKey(), GCMParameterSpec(128, b, 0, 12)) }

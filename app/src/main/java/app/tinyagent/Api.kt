@@ -12,13 +12,9 @@
 // =====================================================================================================
 package app.tinyagent
 
-import org.json.JSONArray
-import org.json.JSONException
-import org.json.JSONObject
+import org.json.*
 import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.SocketTimeoutException
-import java.net.URL
+import java.net.*
 import java.util.Base64
 
 /** Where to send requests. `extraBody` is a JSON object merged into every request body. */
@@ -44,21 +40,34 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
     private val url = ep.baseUrl.trim().trimEnd('/').let { if (it.endsWith("/chat/completions")) it else "$it/chat/completions" }
     private val extraBody: JSONObject? = ep.extraBody.trim().takeIf { it.isNotEmpty() }?.let { JSONObject(it) }
 
-    // Learned from HTTP 400s: newer OpenAI models want max_completion_tokens and only the default temperature.
-    private var tokenKey = "max_tokens"; private var sendTemp = true
+    /**
+     * What we learned about this endpoint from its replies, shared by every task until the app restarts.
+     * - HTTP 400s: newer OpenAI models want max_completion_tokens and only the default temperature.
+     * - Empty replies cut off by the token limit: a reasoning model spent the tiny budget thinking. From then on we
+     *   send a larger budget and ask for low reasoning effort ("low", then "none", then nothing if both are rejected).
+     */
+    private class Quirks { var tokenKey = "max_tokens"; var sendTemp = true; var thinks = false; var budget = 2048; var effort = 0 }
+    private companion object { val learned = HashMap<String, Quirks>(); val EFFORTS = listOf("low", "none") }
+    private val q = synchronized(learned) { learned.getOrPut("$url|${ep.model}") { Quirks() } }
+
+    /** True once this endpoint has shown it is a reasoning ("thinking") model: it works, but slower. */
+    val thinks get() = q.thinks
 
     override fun chat(msgs: List<Msg>, temperature: Double, maxTokens: Int, extra: Map<String, Any?>): Reply {
-        var attempt = 0
+        var attempt = 0; var adapts = 0
         while (true) {
-            val body = JSONObject().put("model", ep.model).put(tokenKey, maxTokens)
+            val body = JSONObject().put("model", ep.model).put(q.tokenKey, if (q.thinks) maxOf(maxTokens, q.budget) else maxTokens)
                 .put("messages", JSONArray().also { a -> msgs.forEach { a.put(msgJson(it)) } })
-            if (sendTemp) body.put("temperature", temperature)
+            if (q.sendTemp) body.put("temperature", temperature)
+            if (q.thinks && q.effort < EFFORTS.size) body.put("reasoning_effort", EFFORTS[q.effort])
             extraBody?.let { e -> e.keys().forEach { body.put(it, e.get(it)) } }
             extra.forEach { (k, v) -> body.put(k, json(v)) }
             try {
-                return post(body.toString().toByteArray())
+                val (r, cutOff) = post(body.toString().toByteArray(), if (q.thinks) 90_000 else 30_000)
+                if (!cutOff || adapts++ >= 3) return r
+                if (q.thinks) q.budget = minOf(q.budget * 2, 8192) else q.thinks = true // empty and cut off: think less, allow more
             } catch (e: ApiError) {
-                if (e.code == 400 && adapt(e.message.orEmpty())) continue
+                if (e.code == 400 && adapts++ < 4 && adapt(e.message.orEmpty())) continue
                 if (!e.retryable || attempt >= waits.size) throw e
                 Thread.sleep(waits[attempt++])
             }
@@ -66,19 +75,21 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
     }
 
     private fun adapt(m: String) = when {
-        tokenKey == "max_tokens" && m.contains("max_completion_tokens") -> { tokenKey = "max_completion_tokens"; true }
-        sendTemp && m.contains("temperature") -> { sendTemp = false; true }
+        q.tokenKey == "max_tokens" && m.contains("max_completion_tokens") -> { q.tokenKey = "max_completion_tokens"; true }
+        q.sendTemp && m.contains("temperature") -> { q.sendTemp = false; true }
+        q.thinks && q.effort < EFFORTS.size && m.contains("reasoning") -> { q.effort++; true }
         else -> false
     }
 
     /** The provider's own error message when the body is OpenAI-style JSON, else the raw text. */
     private fun errText(t: String) = try { JSONObject(t).getJSONObject("error").getString("message") } catch (e: JSONException) { t }.trim().take(200)
 
-    private fun post(bytes: ByteArray): Reply {
+    /** One HTTP call. The flag is true when the visible reply is empty because the model ran out of tokens or only reasoned. */
+    private fun post(bytes: ByteArray, readMs: Int): Pair<Reply, Boolean> {
         val t0 = System.currentTimeMillis()
         try {
             val c = URL(url).openConnection() as HttpURLConnection
-            c.connectTimeout = 10_000; c.readTimeout = 30_000; c.requestMethod = "POST"; c.doOutput = true
+            c.connectTimeout = 10_000; c.readTimeout = readMs; c.requestMethod = "POST"; c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
             if (ep.key.isNotBlank()) c.setRequestProperty("Authorization", "Bearer ${ep.key}")
             c.outputStream.use { it.write(bytes) }
@@ -86,18 +97,19 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
             val text = (if (code < 400) c.inputStream else c.errorStream)?.use { it.readBytes().decodeToString() } ?: ""
             if (code >= 400) throw ApiError("HTTP $code ${errText(text)}", code == 429 || code >= 500, code)
             val j = JSONObject(text)
-            val m = j.getJSONArray("choices").getJSONObject(0).optJSONObject("message")
+            val ch = j.getJSONArray("choices").getJSONObject(0)
+            val m = ch.optJSONObject("message")
             val content = if (m == null || m.isNull("content")) "" else m.getString("content")
             val u = j.optJSONObject("usage")
+            val visible = content.substringAfterLast("</think>").let { if (it.contains("<think>")) it.substringBefore("<think>") else it }
+            val reasoned = (u?.optJSONObject("completion_tokens_details")?.optInt("reasoning_tokens", 0) ?: 0) > 0 ||
+                listOf("reasoning_content", "reasoning").any { k -> m != null && !m.isNull(k) && m.optString(k).isNotEmpty() }
+            val cutOff = visible.isBlank() && (ch.optString("finish_reason") == "length" || reasoned || content.contains("<think>"))
             return Reply(content, u?.optInt("prompt_tokens", -1) ?: -1, u?.optInt("completion_tokens", -1) ?: -1,
-                System.currentTimeMillis() - t0)
-        } catch (e: SocketTimeoutException) {
-            throw ApiError("timeout", true)
-        } catch (e: JSONException) {
-            throw ApiError("bad JSON reply", false)
-        } catch (e: IOException) {
-            throw ApiError("network: ${e.message}", true)
-        }
+                System.currentTimeMillis() - t0) to cutOff
+        } catch (e: SocketTimeoutException) { throw ApiError("timeout", true)
+        } catch (e: JSONException) { throw ApiError("bad JSON reply", false)
+        } catch (e: IOException) { throw ApiError("network: ${e.message}", true) }
     }
 
     private fun msgJson(m: Msg): JSONObject {

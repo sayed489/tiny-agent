@@ -20,7 +20,8 @@ class FakeDevice(var screen: String, private val screens: Map<String, List<Win>>
     override fun tapXY(x: Int, y: Int) = act("tapXY $x,$y")
     override fun type(n: N?, text: String) = act("type ${n?.hint ?: "-"} $text")
     override fun scroll(dir: String, n: N?) = act("scroll $dir")
-    override fun key(k: String) = if (k == "home" && actions.isEmpty()) Res(true, "home") else act("key $k")
+    var homes = 0
+    override fun key(k: String) = if (k == "home" && actions.isEmpty()) { homes++; Res(true, "home") } else act("key $k")
     override fun settle(maxMs: Long) {}
     override fun shot(boxes: List<IntArray>, outW: Int, outH: Int, crop: IntArray?): ByteArray? { shots += boxes.size to crop; return shotResult }
 }
@@ -64,6 +65,33 @@ class AgentTest {
             a == "key enter" && screen == "typed" -> { screen = "results"; Res(true, "pressed enter") }
             else -> Res(true, "ok")
         }
+    }
+
+    @Test fun directAnswerNeedsNoPhone() {
+        val dev = weatherDevice()
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("", "Hi! What should I do on your phone?", false)))), { _, _ -> "tap 1" })
+        val rows = ArrayList<String>()
+        assertEquals("Hi! What should I do on your phone?", Agent(dev, brain, FakeUi(), cfg, csv = { rows += it }).run("Hello"))
+        assertTrue(dev.actions.isEmpty())
+        assertEquals(0, dev.homes) // didn't even leave the chat
+        assertEquals(0, brain.reports)
+        assertTrue(rows.single().endsWith(",answered"))
+    }
+
+    @Test fun replanCannotBailOutWithAnAnswer() {
+        val dev = FakeDevice("home", mapOf("home" to home))
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open the clock", "Alarm", false)), listOf(Step("", "I can't", false)))), { _, _ -> "tap 2" })
+        val ui = FakeUi()
+        val msg = Agent(dev, brain, ui, cfg).run("set an alarm")
+        assertTrue(msg, msg.startsWith("report: stuck at step 1"))
+        assertTrue(ui.logs.contains("↻ Replanning (1/2)"))
+    }
+
+    @Test fun emptyModelRepliesAreShownToTheUser() {
+        val dev = FakeDevice("home", mapOf("home" to home))
+        val ui = FakeUi()
+        Agent(dev, FakeBrain(ArrayDeque(listOf(listOf(Step("open the clock", "Alarm", false)))), { _, _ -> "" }), ui, cfg).run("alarm")
+        assertTrue(ui.logs.contains("⚠ Model reply not understood: (empty)"))
     }
 
     @Test fun happyPathPlanActCheck() {

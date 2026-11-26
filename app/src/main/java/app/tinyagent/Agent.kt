@@ -29,10 +29,8 @@ class Agent(
 ) {
     companion object { const val MAX_ACTIONS = 40; const val MAX_MS = 6 * 60_000L; const val STEP_ACTIONS = 8 }
     private class Pick(val cmd: Cmd, val node: N?, val xy: IntArray?)
-
     @Volatile private var stopped = false
     fun stop() { stopped = true }
-
     private val facts = ArrayList<String>(); private val ran = HashSet<String>() // ran = (screen hash, command) pairs
     private var actions = 0; private var replans = 0; private var t0 = 0L; private var curK = 1
     private var vision = cfg.vision != null; private var w = 1080; private var h = 2400
@@ -44,8 +42,9 @@ class Agent(
             if (dev.locked()) throw Halt("locked", "Unlock the phone first")
             dev.size().let { w = it.first; h = it.second }
             ui.status("Planning…") // the "Goal:" log line is written by the chat screen
+            var plan = newPlan(goal, first = true)
+            plan.singleOrNull()?.takeIf { it.doing.isEmpty() }?.let { throw Halt("answered", it.doneWhen) } // no phone action needed
             dev.key("home"); dev.settle()
-            var plan = newPlan(goal)
             var k = 0; var fresh = false
             while (k < plan.size) {
                 val st = plan[k]; curK = k + 1
@@ -56,8 +55,8 @@ class Agent(
                     throw Halt("stopped", "You declined: ${st.doing}")
                 if (step(goal, st, k + 1, plan.size)) { ui.log("✓ ${k + 1} ${st.doing}"); k++; continue }
                 if (++replans > 2) throw Halt("stuck at step ${k + 1}", "Stuck at step ${k + 1}: ${st.doing}")
-                ui.status("Replanning…")
-                plan = plan.take(k) + newPlan(goal) // keep ticked steps, replace the rest
+                ui.status("Replanning…"); ui.log("↻ Replanning (${replans}/2)")
+                plan = plan.take(k) + newPlan(goal, first = false).ifEmpty { throw Halt("stuck at step ${k + 1}", "Stuck at step ${k + 1}: ${st.doing}") }
                 fresh = true
             }
             status = "done"
@@ -75,8 +74,11 @@ class Agent(
         return msg
     }
 
-    private fun newPlan(goal: String): List<Step> {
+    /** A replan never ends the task with a direct answer: it must return phone steps. */
+    private fun newPlan(goal: String, first: Boolean): List<Step> {
         val p = call { brain.plan(goal, facts.toList(), Screen.digest(dev.windows(), Mode.READ, 120, w, h).text) }
+            .filter { first || it.doing.isNotEmpty() }
+        if (p.singleOrNull()?.doing?.isEmpty() == true) return p
         p.forEachIndexed { i, s -> ui.log("Plan ${i + 1}: ${if (s.risky) "!" else ""}${s.doing} => ${s.doneWhen}") }
         return p
     }
@@ -97,9 +99,10 @@ class Agent(
             val useV = vision && (d.actionable < 3 || d.unlabeled * 2 > d.actionable || noProg >= 2)
             val pick = if (useV) look(st, wins) else null
             val cmd = pick?.cmd ?: run {
-                var (c, err) = parse(call { brain.act(goal, st, k, n, last, tried.toList(), d.text) }, d.items)
+                val reply = call { brain.act(goal, st, k, n, last, tried.toList(), d.text) }
+                var (c, err) = parse(reply, d.items)
                 if (c == null) {
-                    ui.log("bad reply: $err")
+                    ui.log("⚠ Model reply not understood: " + if (reply.isBlank()) "(empty)" else "“${reply.replace('\n', ' ').take(60)}” ($err)")
                     val r = parse(call { brain.act(goal, st, k, n, "ERR $err. Reply with one command.", tried.toList(), d.text) }, d.items)
                     c = r.first; err = r.second
                 }

@@ -26,5 +26,6 @@ Waves run in order. Tasks inside a wave are independent: each edits only its own
 - [x] 5.4 README (R15)
 - [x] 5.5 Build the R8 release APK and verify its manifest, service config and signature
 - [x] 5.7a Chat UI, settings screen, permission prompts, adaptive app icon, OpenAI max_completion_tokens/temperature adaptation (v0.2.0)
+- [x] 5.7b v0.2.1 planning fix: reasoning-model budget + reasoning_effort, plans with ->/→ arrows or plain lists, direct answers ("answer:"), looser tap labels, New chat, visible warnings, latest plan only
 - [ ] 5.6 Manual on-device test: onboarding, the 3 sample goals, volume-down kill switch, vision fallback (needs a phone)
 - [ ] 5.7 Open a PR (needs a GitHub repository; none was provided)

@@ -133,6 +133,42 @@ class ApiTest {
         assertEquals(2, hits.size)
     }
 
+    private fun emptyCutOff() = JSONObject()
+        .put("choices", listOf(mapOf("message" to mapOf("content" to ""), "finish_reason" to "length")))
+        .put("usage", mapOf("prompt_tokens" to 100, "completion_tokens" to 24, "completion_tokens_details" to mapOf("reasoning_tokens" to 24))).toString()
+
+    @Test fun reasoningModelGetsBiggerBudgetAndLowEffort() {
+        responses.addAll(listOf(
+            200 to emptyCutOff(), // spent all 24 tokens thinking, nothing visible
+            400 to """{"error":{"message":"Unsupported value: 'reasoning_effort' does not support 'low' with this model."}}""",
+            200 to ok("tap 2"), 200 to ok("again"), 200 to ok("shared")))
+        val api = OpenAiCompat(Endpoint(base, "k", "thinker"), longArrayOf(1, 1))
+        assertEquals("tap 2", api.chat(listOf(Msg("user", "u")), 0.1, 24).text)
+        assertTrue(api.thinks)
+        assertEquals(24, hits[0].body.getInt("max_tokens")); assertTrue(!hits[0].body.has("reasoning_effort"))
+        assertEquals(2048, hits[1].body.getInt("max_tokens")); assertEquals("low", hits[1].body.getString("reasoning_effort"))
+        assertEquals(2048, hits[2].body.getInt("max_tokens")); assertEquals("none", hits[2].body.getString("reasoning_effort"))
+        assertEquals("again", api.chat(listOf(Msg("user", "u")), 0.1, 2).text) // learned: one round trip
+        assertEquals("none", hits[3].body.getString("reasoning_effort"))
+        assertEquals("shared", OpenAiCompat(Endpoint(base, "k", "thinker")).chat(listOf(Msg("user", "u")), 0.1, 2).text) // next task too
+        assertEquals(2048, hits[4].body.getInt("max_tokens"))
+        assertEquals(5, hits.size)
+    }
+
+    @Test fun thinkTagsCutOffCountAsReasoning() {
+        responses.addAll(listOf(200 to ok("<think>The user wants me to open"), 200 to ok("<think>ok</think>open YouTube")))
+        val api = OpenAiCompat(Endpoint(base, "", "qwen3-local"))
+        assertEquals("<think>ok</think>open YouTube", api.chat(listOf(Msg("user", "u")), 0.1, 24).text)
+        assertEquals(2048, hits[1].body.getInt("max_tokens"))
+    }
+
+    @Test fun plainEmptyReplyIsNotReasoning() {
+        responses.add(200 to ok(""))
+        val api = OpenAiCompat(Endpoint(base, "k", "plain"))
+        assertEquals("", api.chat(listOf(Msg("user", "u")), 0.1, 24).text)
+        assertTrue(!api.thinks); assertEquals(1, hits.size)
+    }
+
     @Test fun nullContentAndMissingUsage() {
         responses.add(200 to JSONObject().put("choices", listOf(mapOf("message" to mapOf("content" to JSONObject.NULL)))).toString())
         val r = OpenAiCompat(Endpoint(base, "k", "m")).chat(listOf(Msg("user", "u")), 0.1, 24)

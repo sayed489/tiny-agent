@@ -40,6 +40,8 @@ These are as specified in brief section 2, with these additions:
 | `open` adds a final tier: a launcher label contained in the query (longest wins) | Tiny models write "open the Clock app". This is still launcher-label matching. |
 | REPORT runs even after a budget stop, but not after a user Stop | The user gets a result sentence, and Stop is always immediate. |
 | API errors after client retries go to `ui.ask("…Retry?")` | This is the "pause and show the error" behaviour. |
+| PLAN prompt differs from the brief's exact text (v0.2.1) | Adds "one step per part of the task" for compound goals and an `answer:` line for chat messages like "Hello"; still ≤150 tokens. |
+| Reasoning models: on an empty, cut-off reply, raise the output budget to 2048 and send `reasoning_effort` (low, then none) | gpt-5/o-series spent the 24-150 token budgets on reasoning and returned nothing, which made every plan fall back to one giant step. |
 | `usesCleartextTraffic=true` | Self-hosted servers on a LAN usually serve plain HTTP. The README tells users to use HTTPS elsewhere. |
 
 ## Speed
