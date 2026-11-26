@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TinyAgent</string>
+    <string name="service_description">TinyAgent reads the screen and taps, types and scrolls to complete the goal you type in the TinyAgent app. Screen text is sent to the model API you configure. Press volume-down to stop a running task.</string>
+</resources>

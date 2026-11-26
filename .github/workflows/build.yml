@@ -1,0 +1,39 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Hard rule 1 (6 Kotlin files, <= 1,200 lines)
+        run: |
+          files=$(find app/src/main -name '*.kt' | xargs -n1 basename | sort | tr '\n' ' ')
+          echo "files: $files"
+          test "$files" = "Agent.kt Api.kt Llm.kt Main.kt Phone.kt Screen.kt "
+          lines=$(cat app/src/main/java/app/tinyagent/*.kt | wc -l)
+          echo "lines: $lines"
+          test "$lines" -le 1200
+
+      - name: Hard rule 2 (no runtime dependencies)
+        run: "! grep -E '^\\s*(implementation|api|runtimeOnly)\\(' app/build.gradle.kts"
+
+      - name: Hard rule 4 (no regex routing)
+        run: "! grep -nE 'Regex\\(|\\.toRegex\\(' app/src/main -r"
+
+      - name: Unit tests, lint, release APK
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TinyAgent-apk
+          path: app/build/outputs/apk/release/app-release.apk
