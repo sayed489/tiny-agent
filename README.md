@@ -56,8 +56,7 @@ Open **Settings** and paste what your provider gives you:
 - **Token use and cost:** every task ends with a line such as `86 calls, 24370 in + 1062 out tokens, $0.0030 (₹0.27)`.
   Enter your model's price per 1M input and output tokens and the dollar-to-rupee rate in Settings (gpt-6-luna lists
   $0.10 in / $0.50 out).
-- **Local servers** (localhost, 192.168.x.x, 10.x, 172.16-31.x, .local) get one request at a time; cloud APIs get the
-  step check and the next action in parallel.
+- Local and cloud endpoints are handled the same way.
 - Parameters a server rejects (for example `top_k` on Azure) are dropped automatically and not sent again.
 - Small models are the target. Reasoning models also work: when a reply comes back empty because the model spent its
   token budget thinking, TinyAgent raises the budget and asks for low reasoning effort, but each step is slower.

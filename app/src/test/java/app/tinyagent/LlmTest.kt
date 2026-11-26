@@ -167,13 +167,6 @@ class LlmTest {
         assertTrue(Screen.tokens(Prompts.ACT) <= 150 && Screen.tokens(Prompts.LOOK) <= 150 && Screen.tokens(Prompts.PLAN) <= 150)
     }
 
-    @Test fun localServerDetection() {
-        for (u in listOf("http://localhost:11434/v1", "http://127.0.0.1:8080/v1", "http://192.168.1.20:8000/v1", "http://10.0.0.5:1234/v1", "http://172.20.0.2/v1", "http://pc.local:8080/v1"))
-            assertTrue(u, Store.local(u))
-        for (u in listOf("https://api.openai.com/v1", "https://x.openai.azure.com/openai/v1", "http://172.40.0.1/v1", "https://api.liquid.ai/openai/v1"))
-            assertTrue(u, !Store.local(u))
-    }
-
     @Test fun usageCountsTokens() {
         val u = Usage()
         val llm = Llm(FakeApi("tap 1"), usage = u)

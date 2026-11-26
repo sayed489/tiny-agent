@@ -8,7 +8,6 @@ data class Config(
     val confirmRisky: Boolean = true, val confirmEvery: Boolean = false, val constrainCheck: Boolean = false,
     val priceIn: Double = 0.0, val priceOut: Double = 0.0, // USD per 1M tokens, for the cost line (0 = not shown)
     val rate: Double = 0.0, // 1 USD in rupees, to show the cost in ₹ too (0 = dollars only)
-    val parallel: Boolean = true, // CHECK and the next ACT at once: faster on cloud APIs; local servers run them one by one
 )
 
 /** Last 200 log lines, shared between the service (writer) and the activity (reader). */
@@ -107,7 +106,7 @@ class Agent(
         if (pre) {
             val d0 = d
             val (ok, r) = checkAndAct(st, Screen.digest(wins, Mode.READ, 200, w, h).text,
-                if (cfg.parallel) ({ brain.act(goal, st, k, n, "none", emptyList(), d0.text) }) else null)
+                { brain.act(goal, st, k, n, "none", emptyList(), d0.text) })
             if (ok) { tickedOn = d.hash; return true } else next = r }
         if (((st.risky && cfg.confirmRisky) || cfg.confirmEvery) && !ui.ask("About to: ${st.doing}")) throw Halt("stopped", "You declined: ${st.doing}")
         while (true) {
@@ -177,7 +176,7 @@ class Agent(
                         val l2 = last; val t2s = (tried + label).takeLast(3) // what the next ACT would be asked anyway
                         val nextV = vision && (d2.actionable < 3 || fails >= 3)
                         val (ok, r) = checkAndAct(st, Screen.digest(wins2, Mode.READ, 200, w, h).text,
-                            if (nextV || !cfg.parallel) null else ({ brain.act(goal, st, k, n, l2, t2s, d2.text) }))
+                            if (nextV) null else ({ brain.act(goal, st, k, n, l2, t2s, d2.text) }))
                         if (ok) { tickedOn = d2.hash; return true }
                         next = r; ui.log("· not yet: ${st.doneWhen}")
                     }
