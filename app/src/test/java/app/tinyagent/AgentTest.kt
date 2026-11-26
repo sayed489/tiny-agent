@@ -170,6 +170,27 @@ class AgentTest {
         assertTrue(ui.logs.contains("· not yet: Subscribed"))
     }
 
+    @Test fun checkAndNextActRunInParallel() {
+        val dev = weatherDevice()
+        val inner = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com", "Google", false), Step("search weather Tokyo", "Tokyo 18°C", false)))), { s, _ ->
+            when { s.contains("Launcher") -> "open google.com"; s.contains("= \"weather Tokyo\"") -> "key enter"; else -> "type Search weather Tokyo" }
+        })
+        var actCalls = 0
+        val slow = object : Brain by inner { // every model call takes 400 ms
+            override fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String): String {
+                Thread.sleep(400); synchronized(this) { actCalls++ }; return inner.act(goal, step, k, n, last, tried, screen)
+            }
+            override fun check(doneWhen: String, screen: String, last: String, doing: String): Boolean { Thread.sleep(400); return inner.check(doneWhen, screen, last, doing) }
+        }
+        val t0 = System.currentTimeMillis()
+        assertEquals("report: done", Agent(dev, slow, FakeUi(), cfg).run("weather in Tokyo"))
+        val ms = System.currentTimeMillis() - t0
+        // Sequential: ACT, CHECK+ACT, CHECK+ACT, CHECK = 6 calls = 2.4 s. In parallel: ACT, then 3 overlapped pairs = 1.6 s.
+        assertTrue("took $ms ms", ms < 2100)
+        assertEquals(listOf("open google.com", "type Search weather Tokyo", "key enter"), dev.actions)
+        assertEquals(4, actCalls) // one speculative ACT was dropped because CHECK said done
+    }
+
     @Test fun lastAndTriedUseLabelForm() {
         val dev = weatherDevice()
         val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com", "Google", false), Step("search", "Tokyo 18°C", false)))), { s, _ ->

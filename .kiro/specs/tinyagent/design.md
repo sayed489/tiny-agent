@@ -61,6 +61,17 @@ These are as specified in brief section 2, with these additions:
 - CHECK is skipped when the screen is unchanged. Launcher labels are cached per task and app labels per service.
 - The release build uses R8 (minify and resource shrink). The APK is about 136 KB.
 
+## Speed (v0.2.6)
+
+- CHECK and the next ACT run at the same time; the ACT reply is used only if CHECK says no. Each action costs one
+  model round trip instead of two. The speculative ACT runs on a short-lived thread, and its failures fall back to a
+  normal ACT call.
+- `settle` ignores TEXT and STATE_DESCRIPTION content changes (video timers, clocks, progress text), waits for 300 ms of
+  quiet (200 ms minimum, 2.5 s maximum, 5 s with a visible ProgressBar).
+- Node conversion skips hidden and off-screen subtrees (each child fetch is an IPC round trip); 1,000 nodes per window.
+- `windows()` reuses the last snapshot until a window event arrives (at most 3 s old).
+- The debug log records `time: wait … ms, read … ms` after every action.
+
 ## Error handling
 
 - `Halt(status, message)` ends a task: stopped, locked, or "stuck at step k".

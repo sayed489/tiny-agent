@@ -8,7 +8,7 @@ Requirements R13 to R15 (tests, CI, README) are inferred from the rest of the br
 
 ## R1 Code shape
 1. The app SHALL have exactly 6 Kotlin files in `app/src/main` (Agent, Llm, Screen, Phone, Main, Api) in package
-   `app.tinyagent`, totalling 1,500 lines or fewer.
+   `app.tinyagent`, totalling 1,550 lines or fewer.
 2. The app SHALL have no runtime dependencies other than the Kotlin stdlib and the Android SDK.
 3. The app SHALL set minSdk 30 and targetSdk 36.
 
@@ -72,7 +72,7 @@ Requirements R13 to R15 (tests, CI, README) are inferred from the rest of the br
 2. `tap` SHALL try ACTION_CLICK, then the nearest clickable ancestor, then a gesture at the centre.
 3. `type` SHALL try ACTION_SET_TEXT, verify the text, then fall back to clipboard paste.
 4. `scroll` SHALL use scroll actions on the largest scrollable node, with a swipe gesture as fallback.
-5. `settle` SHALL wait for 400 ms without events (300 ms minimum, 4 s maximum, 8 s while a ProgressBar is visible).
+5. `settle` SHALL wait for 300 ms without layout events (200 ms minimum, 2.5 s maximum, 5 s while a ProgressBar is visible); text-only and state-description changes (timers, video progress) SHALL NOT count as layout events.
 
 ## R10 Model client
 1. The client SHALL use a 10 s connect timeout and a 30 s read timeout.

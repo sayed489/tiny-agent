@@ -50,11 +50,8 @@ class Agent(
             while (k < plan.size) {
                 val st = plan[k]; curK = k + 1
                 ui.status("Step ${k + 1}/${plan.size}: ${st.doing}")
-                if ((k > 0 || fresh) && call { brain.check(st.doneWhen, read(), lastDone, st.doing) }) { ui.log("✓ ${k + 1} already done"); fresh = false; k++; continue }
-                fresh = false
-                if (((st.risky && cfg.confirmRisky) || cfg.confirmEvery) && !ui.ask("About to: ${st.doing}"))
-                    throw Halt("stopped", "You declined: ${st.doing}")
-                if (step(goal, st, k + 1, plan.size)) { ui.log("✓ ${k + 1} ${st.doing}"); k++; continue }
+                val pre = k > 0 || fresh; fresh = false
+                if (step(goal, st, k + 1, plan.size, pre)) { ui.log("✓ ${k + 1} ${st.doing}"); k++; continue }
                 if (++replans > 2) throw Halt("stuck at step ${k + 1}", "Stuck at step ${k + 1}: ${st.doing}")
                 ui.status("Replanning…"); ui.log("↻ Replanning (${replans}/2)")
                 plan = plan.take(k) + newPlan(goal, first = false).ifEmpty { throw Halt("stuck at step ${k + 1}", "Stuck at step ${k + 1}: ${st.doing}") }
@@ -89,18 +86,25 @@ class Agent(
         brain.report(goal, status, read())
     } catch (e: Exception) { "" }
 
-    /** Runs one step. true = step done, false = replan needed. */
-    private fun step(goal: String, st: Step, k: Int, n: Int): Boolean {
+    /** Runs one step. true = step done, false = replan needed. [pre]: first check whether it is already done (while ACT runs). */
+    private fun step(goal: String, st: Step, k: Int, n: Int, pre: Boolean): Boolean {
         var wins = dev.windows(); var d = act(wins)
-        var noProg = 0; var acts = 0; var last = "none"; var scrolls = 0
+        var noProg = 0; var acts = 0; var last = "none"; var scrolls = 0; var next: String? = null
         val tried = ArrayDeque<String>(); val seen = hashSetOf(d.hash)
+        if (pre) {
+            val d0 = d
+            val (ok, r) = checkAndAct(st, Screen.digest(wins, Mode.READ, 200, w, h).text) { brain.act(goal, st, k, n, "none", emptyList(), d0.text) }
+            if (ok) return true else next = r
+        }
+        if (((st.risky && cfg.confirmRisky) || cfg.confirmEvery) && !ui.ask("About to: ${st.doing}")) throw Halt("stopped", "You declined: ${st.doing}")
         while (true) {
             budget()
             if (noProg >= 4 || acts >= STEP_ACTIONS) { fact("stuck at: ${st.doing}"); return false }
             val useV = vision && (d.actionable < 3 || d.unlabeled * 2 > d.actionable || noProg >= 2)
             val pick = if (useV) look(st, wins) else null
             val cmd = pick?.cmd ?: run {
-                val reply = call { brain.act(goal, st, k, n, last, tried.toList(), d.text) }
+                val reply = next ?: call { brain.act(goal, st, k, n, last, tried.toList(), d.text) }
+                next = null
                 var (c, err) = parse(reply, d.items)
                 if (c == null) {
                     ui.log("⚠ Model reply not understood: " + if (reply.isBlank()) "(empty)" else "“${reply.replace('\n', ' ').take(60)}” ($err)")
@@ -123,11 +127,12 @@ class Agent(
             val res = exec(cmd, d, pick)
             actions++; acts++
             ui.log("→ $label: ${res.msg}")
-            dev.settle()
+            val t1 = now(); dev.settle(); val t2 = now()
             if (res.missingApp != null) { fact("${res.missingApp} is not installed; use its website"); return false }
             // The step is "open X" and X opened (or was already open): proof enough, even if its done-when text is too strict.
             if (res.ok && cmd is Cmd.Open && opens(st, cmd)) { lastDone = "$label -> ${res.msg}"; return true }
             val wins2 = dev.windows(); val d2 = act(wins2)
+            ui.log("  time: wait ${t2 - t1} ms, read ${now() - t2} ms") // debug log only; the chat ignores it
             when {
                 !res.ok -> { last = "$label failed: ${res.msg}"; noProg++ }
                 d2.hash == d.hash -> { last = "$label -> screen unchanged"; noProg++ }
@@ -136,14 +141,30 @@ class Agent(
                     last = "$label -> screen changed"; seen += d2.hash
                     if (cmd is Cmd.Scroll && ++scrolls > 2) { last = "$label -> screen changed; scrolled $scrolls times in a row, try another command"; noProg++ }
                     lastDone = "$label -> ${res.msg}"
-                    if (call { brain.check(st.doneWhen, Screen.digest(wins2, Mode.READ, 200, w, h).text, lastDone, st.doing) }) return true
-                    ui.log("· not yet: ${st.doneWhen}")
+                    val l2 = last; val t2s = (tried + label).takeLast(3) // what the next ACT would be asked anyway
+                    val nextV = vision && (d2.actionable < 3 || d2.unlabeled * 2 > d2.actionable || noProg >= 2)
+                    val (ok, r) = checkAndAct(st, Screen.digest(wins2, Mode.READ, 200, w, h).text,
+                        if (nextV) null else ({ brain.act(goal, st, k, n, l2, t2s, d2.text) }))
+                    if (ok) return true
+                    next = r; ui.log("· not yet: ${st.doneWhen}")
                 }
             }
             if (cmd !is Cmd.Scroll) scrolls = 0
             tried.addLast(label); if (tried.size > 3) tried.removeFirst()
             wins = wins2; d = d2
         }
+    }
+
+    /**
+     * CHECK and the next ACT at the same time, so each action costs one model round trip instead of two.
+     * The ACT reply is dropped when CHECK says the step is done, and is re-asked normally if the speculative call failed.
+     */
+    private fun checkAndAct(st: Step, screen: String, act: (() -> String)?): Pair<Boolean, String?> {
+        var reply: String? = null
+        val t = act?.let { f -> Thread { reply = try { f() } catch (e: Exception) { null } }.apply { isDaemon = true; start() } }
+        val ok = call { brain.check(st.doneWhen, screen, lastDone, st.doing) }
+        if (!ok) t?.join()
+        return ok to reply
     }
 
     private fun look(st: Step, wins: List<Win>): Pick? {

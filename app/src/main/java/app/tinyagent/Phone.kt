@@ -26,7 +26,7 @@ interface Device {
     fun windows(): List<Win>; fun size(): Pair<Int, Int>; fun locked(): Boolean
     fun open(target: String): Res; fun tap(n: N): Res; fun tapXY(x: Int, y: Int): Res
     fun type(n: N?, text: String): Res; fun scroll(dir: String, n: N?): Res; fun key(k: String): Res
-    fun settle(maxMs: Long = 4000)
+    fun settle(maxMs: Long = 2500)
     fun shot(boxes: List<IntArray>, outW: Int, outH: Int, crop: IntArray? = null): ByteArray? // JPEG with numbered boxes; null if protected
 }
 
@@ -44,7 +44,14 @@ class Phone : AccessibilityService(), Device, Ui {
     private var apps: List<Pair<String, ComponentName>>? = null
 
     override fun onServiceConnected() { instance = this }
-    override fun onAccessibilityEvent(e: AccessibilityEvent?) { if (e?.packageName != packageName) lastEvent = SystemClock.uptimeMillis() }
+    override fun onAccessibilityEvent(e: AccessibilityEvent?) {
+        if (e == null || e.packageName == packageName) return
+        dirty = true // any change invalidates the cached snapshot
+        // Video timers, clocks and progress text fire endless TEXT/STATE changes: they don't mean the layout is still moving.
+        val minor = AccessibilityEvent.CONTENT_CHANGE_TYPE_TEXT or AccessibilityEvent.CONTENT_CHANGE_TYPE_STATE_DESCRIPTION
+        if (e.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && e.contentChangeTypes != 0 && e.contentChangeTypes and minor.inv() == 0) return
+        lastEvent = SystemClock.uptimeMillis()
+    }
     override fun onInterrupt() = stopAgent()
     override fun onUnbind(intent: Intent?): Boolean { stopAgent(); instance = null; return super.onUnbind(intent) }
 
@@ -118,7 +125,16 @@ class Phone : AccessibilityService(), Device, Ui {
     }
 
     // ---- Device: screen reading ----
+    @Volatile private var dirty = true; private var snap: List<Win>? = null; private var snapAt = 0L
+    /** Reuses the last snapshot when no window event arrived since (scroll/type/onlyInput re-read the same screen). */
     override fun windows(): List<Win> {
+        snap?.let { if (!dirty && SystemClock.uptimeMillis() - snapAt < 3000) return it }
+        dirty = false
+        return read().also { snap = it; snapAt = SystemClock.uptimeMillis() }
+    }
+
+    private fun read(): List<Win> {
+        val (sw, sh) = size()
         for (attempt in 0..3) {
             val out = ArrayList<Win>(); var activeMissing = false; var ime = Int.MAX_VALUE
             for (w in (try { getWindows() } catch (e: Exception) { emptyList() }).sortedByDescending { it.layer }) {
@@ -128,7 +144,7 @@ class Phone : AccessibilityService(), Device, Ui {
                 if (r == null) { if (w.isActive) activeMissing = true; continue }
                 val pkg = r.packageName?.toString() ?: ""
                 val own = pkg == packageName || w.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
-                val root = if (own || isIme) leaf() else conv(r, 0, intArrayOf(1500))
+                val root = if (own || isIme) leaf() else conv(r, 0, intArrayOf(1000), sw, sh)
                 out += Win(root, pkg, label(pkg), w.layer, isIme, own, w.isActive)
             }
             imeTop = ime
@@ -138,11 +154,13 @@ class Phone : AccessibilityService(), Device, Ui {
     }
 
     private fun leaf() = N(null, null, null, null, "", 0, 0, 0, 0, false, false, false, false, false, false, false, false, false, emptyList())
-    private fun conv(a: AccessibilityNodeInfo, depth: Int, budget: IntArray): N {
+    /** Copies a node. Hidden or off-screen subtrees are not fetched: each child fetch is a round trip to the app. */
+    private fun conv(a: AccessibilityNodeInfo, depth: Int, budget: IntArray, sw: Int, sh: Int): N {
         budget[0]--
         val b = Rect(); a.getBoundsInScreen(b)
         val acts = a.actionList
-        val kids = if (depth > 60 || budget[0] <= 0) emptyList() else (0 until a.childCount).mapNotNull { i -> a.getChild(i)?.let { conv(it, depth + 1, budget) } }
+        val skip = depth > 60 || budget[0] <= 0 || (depth > 0 && (!a.isVisibleToUser || b.right <= 0 || b.bottom <= 0 || b.left >= sw || b.top >= sh))
+        val kids = if (skip) emptyList() else (0 until a.childCount).mapNotNull { i -> a.getChild(i)?.let { conv(it, depth + 1, budget, sw, sh) } }
         return N(if (a.isShowingHintText) null else a.text?.toString(), a.contentDescription?.toString(), a.hintText?.toString(),
             a.viewIdResourceName, a.className?.toString() ?: "", b.left, b.top, b.right, b.bottom, a.isVisibleToUser,
             a.isClickable || acts.contains(AA.ACTION_CLICK), a.isEditable, a.isCheckable, @Suppress("DEPRECATION") a.isChecked,
@@ -160,17 +178,17 @@ class Phone : AccessibilityService(), Device, Ui {
     }.let { (it.x to it.y).also { d -> dims = d } }
     override fun locked() = getSystemService(KeyguardManager::class.java).isKeyguardLocked
 
-    /** Wait for 400 ms without window events (min 300 ms, max [maxMs]; up to 8 s while a ProgressBar shows). */
+    /** Wait for 300 ms without layout events (min 200 ms, max [maxMs]; up to 5 s while a ProgressBar shows). */
     override fun settle(maxMs: Long) {
         val t0 = SystemClock.uptimeMillis(); var limit = maxMs; var lastProg = 0L
         while (true) {
-            Thread.sleep(50)
+            Thread.sleep(40)
             val now = SystemClock.uptimeMillis(); val el = now - t0
             if (el >= limit) return
-            if (el < 300 || now - lastEvent < 400 || now - lastProg < 500) continue
+            if (el < 200 || now - lastEvent < 300 || now - lastProg < 500) continue
             lastProg = now
-            if (!progress(rootInActiveWindow, intArrayOf(400))) return
-            limit = maxOf(limit, 8000)
+            if (!progress(rootInActiveWindow, intArrayOf(300))) return
+            limit = maxOf(limit, 5000)
         }
     }
 

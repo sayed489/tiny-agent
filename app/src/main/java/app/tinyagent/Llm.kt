@@ -111,8 +111,8 @@ class Llm(
                      extra: Map<String, Any?> = emptyMap(), jpeg: ByteArray? = null): String {
         val e = est(sys, user, if (jpeg != null) imgTokens else 0)
         val r = api.chat(listOf(Msg("system", sys), Msg("user", user, jpeg)), temp, max, extra)
-        usage.calls++; val p = if (r.promptTokens >= 0) r.promptTokens else e
-        if (p > usage.maxPrompt) usage.maxPrompt = p
+        val p = if (r.promptTokens >= 0) r.promptTokens else e
+        synchronized(usage) { usage.calls++; if (p > usage.maxPrompt) usage.maxPrompt = p } // CHECK and ACT can run in parallel
         log("$type est=$e prompt=${r.promptTokens} out=${r.completionTokens} ${r.ms}ms: ${r.text.replace('\n', ' ').take(120)}")
         if (p > 450) log("WARN $type prompt is $p tokens (limit 450)")
         return r.text

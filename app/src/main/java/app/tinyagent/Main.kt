@@ -119,7 +119,8 @@ class Main : Activity() {
         if (goal.isEmpty() || busy) return
         val phone = Phone.instance ?: run { askService(); return }
         Store.problem(this)?.let { toast(it); startActivity(Intent(this, Options::class.java)); return }
-        RunLog.add("Goal: $goal"); input.setText("")
+        RunLog.add("Goal: $goal"); input.setText(""); input.clearFocus()
+        getSystemService(android.view.inputmethod.InputMethodManager::class.java).hideSoftInputFromWindow(input.windowToken, 0)
         if (!phone.start(goal, Store.config(this))) RunLog.add("Result (error): Could not start")
     }
 
