@@ -15,7 +15,7 @@ sealed class Cmd {
 }
 
 interface Brain {
-    fun plan(goal: String, facts: List<String>, screen: String): List<Step>
+    fun plan(goal: String, facts: List<String>, screen: String, apps: List<String> = emptyList()): List<Step>
     fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String): String
     fun check(doneWhen: String, screen: String, last: String = "none", doing: String = ""): Boolean
     fun report(goal: String, status: String, screen: String): String
@@ -28,15 +28,15 @@ class Usage { @Volatile var calls = 0; @Volatile var maxPrompt = 0; @Volatile va
 /** Static system prompts: byte-identical on every call of the same type (prefix-cache friendly). */
 object Prompts {
     const val PLAN = "You plan phone tasks. Write 1 to 6 steps, one per line:\n" +
-        "<action> => <what the screen shows when it is done>\n" +
-        "One step per part of the task. Describe results, not buttons.\n" +
-        "Use the app the user named, else a website.\n" +
-        "Start a line with ! if it sends, posts, buys, orders or deletes.\n" +
+        "<action> => <short result the screen shows>\n" +
+        "One step per part of the task. Keep names, numbers and text from the task in the steps.\n" +
+        "Use the app the user named, else the best one in Apps; a website only if none fits.\n" +
+        "Start a line with ! if it sends, buys or deletes.\n" +
         "If no phone action is needed, write only: answer: <reply>\n" +
-        "Example: weather in Paris\n" +
-        "open google.com => Google is open\n" +
-        "search weather Paris => weather results are shown\n" +
-        "read the temperature => Paris temperature is visible"
+        "Example: text Sam \"hi\" on WhatsApp\n" +
+        "open WhatsApp => WhatsApp is open\n" +
+        "open Sam's chat => Sam's chat is open\n" +
+        "!send \"hi\" => \"hi\" is sent"
     const val ACT = "You control an Android phone. Reply with ONE command and nothing else:\n" +
         "open <app name or website>\n" +
         "tap <id>\n" +
@@ -44,9 +44,10 @@ object Prompts {
         "scroll down|up|left|right\n" +
         "key back|home|enter|notifications\n" +
         "done (the current step is already finished)\n" +
-        "Use ids from Screen. Do only the current step. To type, there must be an input; if not, tap a search or text box first. " +
+        "Use ids from Screen and exact names, numbers and text from Goal. Do only the current step. " +
+        "To type, there must be an input; if not, tap a search or text box first. " +
         "If a popup is in the way, close it or answer it safely. Never repeat a command in Tried."
-    const val CHECK = "Is the step done? Answer Y or N. Say Y when the screen shows the step's result, even if small details differ."
+    const val CHECK = "Is the step done? Answer Y or N. Y only if the screen shows its result; names, numbers and times must match."
     const val REPORT = "Tell the user the result of their phone task in one short sentence, using only what the screen shows. If it failed, say what is missing."
     const val LOOK = "This is a phone screenshot with numbered boxes. Reply with ONE command: tap <number>, scroll down, or key back."
 }
@@ -64,11 +65,12 @@ class Llm(
         }
     }
 
-    override fun plan(goal: String, facts: List<String>, screen: String): List<Step> {
+    override fun plan(goal: String, facts: List<String>, screen: String, apps: List<String>): List<Step> {
         val f = facts.joinToString("; ").ifEmpty { "none" }
-        val user = fit(Prompts.PLAN, screen) { "Task: $goal\nFacts: $f\nScreen now:\n$it" }
-        var r = send("PLAN", planApi, Prompts.PLAN, user, 0.3, 240)
-        return parsePlan(r).ifEmpty { r = send("PLAN", planApi, Prompts.PLAN, user, 0.5, 240); parsePlan(r) }.ifEmpty {
+        val a = appList(apps, 130).ifEmpty { "unknown" } // installed apps, so the planner picks a real app over a website
+        val user = fit(Prompts.PLAN, screen) { "Task: $goal\nFacts: $f\nApps: $a\nScreen now:\n$it" }
+        var r = send("PLAN", planApi, Prompts.PLAN, user, 0.3, 240) // fast first; a thinking model may think on the retry
+        return parsePlan(r).ifEmpty { r = send("PLAN", planApi, Prompts.PLAN, user, 0.5, 240, think = true); parsePlan(r) }.ifEmpty {
             log("⚠ Could not read the model's plan " + if (r.isBlank()) "(empty reply)" else "“${r.replace('\n', ' ').take(80)}”")
             listOf(Step(goal, "the goal is done", false))
         }
@@ -108,9 +110,9 @@ class Llm(
     private fun est(sys: String, user: String, img: Int) = Screen.tokens(sys) + Screen.tokens(user) + 10 + img // +10: chat template
 
     private fun send(type: String, api: ChatApi, sys: String, user: String, temp: Double, max: Int,
-                     extra: Map<String, Any?> = emptyMap(), jpeg: ByteArray? = null): String {
+                     extra: Map<String, Any?> = emptyMap(), jpeg: ByteArray? = null, think: Boolean = false): String {
         val e = est(sys, user, if (jpeg != null) imgTokens else 0)
-        val r = api.chat(listOf(Msg("system", sys), Msg("user", user, jpeg)), temp, max, extra)
+        val r = api.chat(listOf(Msg("system", sys), Msg("user", user, jpeg)), temp, max, extra, think)
         val p = if (r.promptTokens >= 0) r.promptTokens else e
         synchronized(usage) { usage.calls++; if (p > usage.maxPrompt) usage.maxPrompt = p } // CHECK and ACT can run in parallel
         log("$type est=$e prompt=${r.promptTokens} out=${r.completionTokens} ${r.ms}ms: ${r.text.replace('\n', ' ').take(120)}")
@@ -136,6 +138,15 @@ fun firstLine(reply: String): String {
     return s.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: ""
 }
 
+/** Launcher labels for PLAN, shortest first (core apps have short names) until [maxTokens], then alphabetical. */
+fun appList(apps: List<String>, maxTokens: Int): String {
+    val out = ArrayList<String>(); var used = 0
+    for (a in apps.map { it.trim() }.filter { it.isNotEmpty() }.distinct().sortedWith(compareBy({ it.length }, { it }))) {
+        val t = Screen.tokens("$a, "); if (used + t > maxTokens) break; used += t; out += a
+    }
+    return out.sorted().joinToString(", ")
+}
+
 /** The first yes/no word anywhere in the reply ("Y", "Yes.", "Answer: Y", "**N**", "y\n"). No such word counts as no. */
 fun yes(reply: String): Boolean {
     val s = reply.substringAfterLast("</think>").let { if (it.contains("<think>")) it.substringBefore("<think>") else it }
@@ -157,18 +168,24 @@ fun cleanLine(line: String): String {
 
 private fun unq(s: String) = s.trim().trim('"', '\'', '“', '”', '`').trim()
 private fun word(s: String) = unq(s).trim('(', ')', '[', ']').trimEnd('.', '!', ',', ';').lowercase()
+private fun valid(id: Int, items: List<Item>, maxMark: Int) = if (maxMark > 0) id in 1..maxMark else items.any { it.id == id }
+
 fun parse(reply: String, items: List<Item>, maxMark: Int = 0): Pair<Cmd?, String?> {
     val line = cleanLine(firstLine(reply))
     if (line.isEmpty()) return null to "empty reply"
     // Tiny models write "I will tap 3" or "tap(3)": take the verb from the first 3 words, the rest is its argument.
     val toks = line.split(' ').filter { it.isNotEmpty() }
     fun verbOf(t: String) = t.takeWhile { it.isLetter() }.lowercase().let { ALIAS[it] ?: it }
+    // A bare number ("3", "<3>", "[3]") means tap it: tiny models and vision models often answer that way.
+    line.trim('<', '>', '[', ']', '(', ')', '#', '.', ' ').toIntOrNull()?.let { return if (valid(it, items, maxMark)) Cmd.Tap(it) to null else null to "no id $it on Screen" }
     val vi = toks.take(3).indexOfFirst { verbOf(it) in VERBS }
     if (vi < 0) return null to "unknown command ${verbOf(toks[0])}"
     val verb = verbOf(toks[vi])
-    val rest = (toks[vi].dropWhile { it.isLetter() } + " " + toks.drop(vi + 1).joinToString(" ")).trim(':', ' ')
+    // "open Clock tap Alarms scroll down": keep only the first command (type text is kept whole).
+    val args = toks.drop(vi + 1).let { a -> if (verb == "type") a else a.take(a.indexOfFirst { verbOf(it) in VERBS }.let { i -> if (i < 0) a.size else i }) }
+    val rest = (toks[vi].dropWhile { it.isLetter() } + " " + args.joinToString(" ")).trim(':', ' ')
     fun idOf(tok: String): Int? = tok.trim('[', ']', '(', ')', '#', '.', ',').toIntOrNull()
-    fun valid(id: Int) = if (maxMark > 0) id in 1..maxMark else items.any { it.id == id }
+    fun valid(id: Int) = valid(id, items, maxMark)
     /** Exact unique label; with [loose], also "tap on the X button" (longest label inside) or "tap Voice" (unique prefix). */
     fun byLabel(s: String, pool: List<Item>, loose: Boolean = false): Int? {
         val q = unq(s).lowercase()

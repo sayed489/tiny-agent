@@ -28,6 +28,7 @@ interface Device {
     fun type(n: N?, text: String): Res; fun scroll(dir: String, n: N?): Res; fun key(k: String): Res
     fun settle(maxMs: Long = 2500)
     fun shot(boxes: List<IntArray>, outW: Int, outH: Int, crop: IntArray? = null): ByteArray? // JPEG with numbered boxes; null if protected
+    fun apps(): List<String> = emptyList() // launcher labels, given to PLAN
 }
 
 class Phone : AccessibilityService(), Device, Ui {
@@ -206,8 +207,7 @@ class Phone : AccessibilityService(), Device, Ui {
             intent = Intent(Intent.ACTION_VIEW, Uri.parse(if (t.startsWith("http://") || t.startsWith("https://")) t else "https://$t"))
             pkg = packageManager.resolveActivity(intent, 0)?.activityInfo?.packageName
         } else {
-            val list = apps ?: packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
-                .map { it.loadLabel(packageManager).toString() to ComponentName(it.activityInfo.packageName, it.activityInfo.name) }.also { apps = it }
+            val list = launcher()
             val i = Screen.pickApp(t, list.map { it.first })
             if (i < 0) return Res(false, "no app named $t", missingApp = t)
             intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(list[i].second)
@@ -218,6 +218,10 @@ class Phone : AccessibilityService(), Device, Ui {
         while (pkg != null && pkg != "android" && SystemClock.uptimeMillis() - t0 < 8000 && rootInActiveWindow?.packageName?.toString() != pkg) Thread.sleep(150)
         return if (pkg == null || pkg == "android" || rootInActiveWindow?.packageName?.toString() == pkg) Res(true, "opened $t") else Res(false, "$t did not open within 8 s")
     }
+
+    override fun apps() = launcher().filter { it.second.packageName != packageName }.map { it.first }
+    private fun launcher() = apps ?: packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
+        .map { it.loadLabel(packageManager).toString() to ComponentName(it.activityInfo.packageName, it.activityInfo.name) }.also { apps = it }
 
     override fun tap(n: N): Res {
         val a = n.ref as? AccessibilityNodeInfo

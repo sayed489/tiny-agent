@@ -24,6 +24,7 @@ class FakeDevice(var screen: String, private val screens: Map<String, List<Win>>
     override fun key(k: String) = if (k == "home" && actions.isEmpty()) { homes++; Res(true, "home") } else act("key $k")
     override fun settle(maxMs: Long) {}
     override fun shot(boxes: List<IntArray>, outW: Int, outH: Int, crop: IntArray?): ByteArray? { shots += boxes.size to crop; return shotResult }
+    override fun apps() = listOf("Clock", "Chrome", "WhatsApp")
 }
 
 /** Scripted brain: plans from a queue, ACT/LOOK replies from functions, CHECK by substring of the READ digest. */
@@ -36,7 +37,10 @@ class FakeBrain(
     val actLasts = ArrayList<String>()
     var checks = 0; var reports = 0
     private var lastPlan = emptyList<Step>()
-    override fun plan(goal: String, facts: List<String>, screen: String): List<Step> { planFacts += facts; lastPlan = plans.removeFirstOrNull() ?: lastPlan; return lastPlan }
+    val planApps = ArrayList<List<String>>()
+    override fun plan(goal: String, facts: List<String>, screen: String, apps: List<String>): List<Step> {
+        planFacts += facts; planApps += apps; lastPlan = plans.removeFirstOrNull() ?: lastPlan; return lastPlan
+    }
     override fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String): String { actLasts += last; return acts(screen, last) }
     val checkLasts = ArrayList<String>()
     val checkSteps = ArrayList<String>()
@@ -191,6 +195,28 @@ class AgentTest {
         assertEquals(4, actCalls) // one speculative ACT was dropped because CHECK said done
     }
 
+    @Test fun plannerSeesInstalledApps() {
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("", "hi", false)))), { _, _ -> "tap 1" })
+        Agent(weatherDevice(), brain, FakeUi(), cfg).run("Hello")
+        assertEquals(listOf("Clock", "Chrome", "WhatsApp"), brain.planApps.single())
+    }
+
+    @Test fun oneScreenCannotTickSeveralStepsOnCheckAlone() {
+        val shown = listOf(app(textNode("Alarm 7:30 on", 300), button("OK", 600), label = "Clock"))
+        val dev = FakeDevice("clock", mapOf("clock" to shown))
+        val events = java.util.Collections.synchronizedList(ArrayList<String>())
+        val inner = FakeBrain(ArrayDeque(listOf(listOf(Step("open Clock", "Alarm 7:30", false), Step("set 7:30", "Alarm 7:30", false), Step("save", "Alarm 7:30", false)))), { _, _ -> "done" })
+        val brain = object : Brain by inner {
+            override fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String): String {
+                Thread.sleep(150); events += "act:${step.doing}"; return "done"
+            }
+            override fun check(doneWhen: String, screen: String, last: String, doing: String): Boolean { events += "check:$doing"; return true }
+        }
+        Agent(dev, brain, FakeUi(), cfg).run("alarm")
+        // Each step: the model is asked first (and says done), then CHECK verifies. No step is ticked by CHECK alone.
+        assertEquals(listOf("act:open Clock", "check:open Clock", "act:set 7:30", "check:set 7:30", "act:save", "check:save"), events.toList())
+    }
+
     @Test fun lastAndTriedUseLabelForm() {
         val dev = weatherDevice()
         val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com", "Google", false), Step("search", "Tokyo 18°C", false)))), { s, _ ->
@@ -287,9 +313,9 @@ class AgentTest {
         var failed = false
         val inner = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com", "Google", false)))), { _, _ -> "open google.com" })
         val flaky = object : Brain by inner {
-            override fun plan(goal: String, facts: List<String>, screen: String): List<Step> {
+            override fun plan(goal: String, facts: List<String>, screen: String, apps: List<String>): List<Step> {
                 if (!failed) { failed = true; throw ApiError("HTTP 503", true) }
-                return inner.plan(goal, facts, screen)
+                return inner.plan(goal, facts, screen, apps)
             }
         }
         val ui = FakeUi(true)

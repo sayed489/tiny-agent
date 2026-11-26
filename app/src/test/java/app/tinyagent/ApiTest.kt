@@ -137,22 +137,45 @@ class ApiTest {
         .put("choices", listOf(mapOf("message" to mapOf("content" to ""), "finish_reason" to "length")))
         .put("usage", mapOf("prompt_tokens" to 100, "completion_tokens" to 24, "completion_tokens_details" to mapOf("reasoning_tokens" to 24))).toString()
 
-    @Test fun reasoningModelGetsBiggerBudgetAndLowEffort() {
-        responses.addAll(listOf(
-            200 to emptyCutOff(), // spent all 24 tokens thinking, nothing visible
-            400 to """{"error":{"message":"Unsupported value: 'reasoning_effort' does not support 'low' with this model."}}""",
-            200 to ok("tap 2"), 200 to ok("again"), 200 to ok("shared")))
+    private fun thinkingOff(h: Hit) = h.body.optJSONObject("chat_template_kwargs")?.optBoolean("enable_thinking", true) == false
+    private fun okThought(content: String, out: Int) = JSONObject()
+        .put("choices", listOf(mapOf("message" to mapOf("content" to content), "finish_reason" to "stop")))
+        .put("usage", mapOf("prompt_tokens" to 100, "completion_tokens" to out)).toString()
+    private val u = listOf(Msg("user", "u"))
+
+    @Test fun thinkingModelIsSwitchedOffForQuickCalls() {
+        responses.addAll(listOf(200 to emptyCutOff(), 200 to ok("tap 2"), 200 to ok("again"), 200 to ok("plan")))
         val api = OpenAiCompat(Endpoint(base, "k", "thinker"), longArrayOf(1, 1))
-        assertEquals("tap 2", api.chat(listOf(Msg("user", "u")), 0.1, 24).text)
+        assertEquals("tap 2", api.chat(u, 0.1, 24, think = false).text)
         assertTrue(api.thinks)
-        assertEquals(24, hits[0].body.getInt("max_tokens")); assertTrue(!hits[0].body.has("reasoning_effort"))
-        assertEquals(2048, hits[1].body.getInt("max_tokens")); assertEquals("low", hits[1].body.getString("reasoning_effort"))
-        assertEquals(2048, hits[2].body.getInt("max_tokens")); assertEquals("none", hits[2].body.getString("reasoning_effort"))
-        assertEquals("again", api.chat(listOf(Msg("user", "u")), 0.1, 2).text) // learned: one round trip
-        assertEquals("none", hits[3].body.getString("reasoning_effort"))
-        assertEquals("shared", OpenAiCompat(Endpoint(base, "k", "thinker")).chat(listOf(Msg("user", "u")), 0.1, 2).text) // next task too
-        assertEquals(2048, hits[4].body.getInt("max_tokens"))
-        assertEquals(5, hits.size)
+        assertTrue(!thinkingOff(hits[0])) // not known to think yet
+        assertTrue(thinkingOff(hits[1])) // retried at once with the switch
+        assertEquals("again", api.chat(u, 0.1, 16, think = false).text)
+        assertTrue(thinkingOff(hits[2])) // remembered
+        assertEquals("plan", api.chat(u, 0.3, 240, think = true).text)
+        assertTrue(!thinkingOff(hits[3]) && !hits[3].body.has("reasoning_effort")) // a call that may think gets no switch
+        assertEquals(4, hits.size)
+    }
+
+    @Test fun rejectedSwitchFallsBackToTheNextOne() {
+        responses.addAll(listOf(200 to emptyCutOff(), 400 to """{"error":{"message":"Unknown field: chat_template_kwargs"}}""", 200 to ok("tap 2")))
+        assertEquals("tap 2", OpenAiCompat(Endpoint(base, "k", "t2"), longArrayOf(1, 1)).chat(u, 0.1, 24, think = false).text)
+        assertEquals("none", hits[2].body.getString("reasoning_effort")); assertTrue(!hits[2].body.has("chat_template_kwargs"))
+    }
+
+    @Test fun ignoredSwitchMovesToTheNextOneNextTime() {
+        // The server accepts enable_thinking=false but the model still writes 900 tokens for "tap 2".
+        responses.addAll(listOf(200 to emptyCutOff(), 200 to okThought("tap 2", 900), 200 to ok("tap 3")))
+        val api = OpenAiCompat(Endpoint(base, "k", "t3"), longArrayOf(1, 1))
+        assertEquals("tap 2", api.chat(u, 0.1, 24, think = false).text)
+        assertEquals("tap 3", api.chat(u, 0.1, 24, think = false).text)
+        assertTrue(thinkingOff(hits[1])); assertEquals("none", hits[2].body.getString("reasoning_effort"))
+    }
+
+    @Test fun userExtraBodyOverridesTheSwitch() {
+        responses.addAll(listOf(200 to emptyCutOff(), 200 to ok("tap 2")))
+        OpenAiCompat(Endpoint(base, "k", "t4", """{"chat_template_kwargs":{"enable_thinking":true}}"""), longArrayOf(1, 1)).chat(u, 0.1, 24, think = false)
+        assertEquals(true, hits[1].body.getJSONObject("chat_template_kwargs").getBoolean("enable_thinking"))
     }
 
     @Test fun thinkTagsCutOffCountAsReasoning() {

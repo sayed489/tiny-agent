@@ -34,6 +34,7 @@ class Agent(
     private val facts = ArrayList<String>(); private val ran = HashSet<String>() // ran = (screen hash, command) pairs
     private var actions = 0; private var replans = 0; private var t0 = 0L; private var curK = 1
     private var vision = cfg.vision != null; private var w = 1080; private var h = 2400; private var lastDone = "none" // CHECK evidence
+    private var tickedOn: Int? = null // screen hash where the last step ticked: the next step must act there before CHECK alone can tick it
 
     fun run(goal: String): String {
         t0 = now()
@@ -50,7 +51,7 @@ class Agent(
             while (k < plan.size) {
                 val st = plan[k]; curK = k + 1
                 ui.status("Step ${k + 1}/${plan.size}: ${st.doing}")
-                val pre = k > 0 || fresh; fresh = false
+                val pre = k > 0 || fresh; if (fresh) tickedOn = null; fresh = false
                 if (step(goal, st, k + 1, plan.size, pre)) { ui.log("✓ ${k + 1} ${st.doing}"); k++; continue }
                 if (++replans > 2) throw Halt("stuck at step ${k + 1}", "Stuck at step ${k + 1}: ${st.doing}")
                 ui.status("Replanning…"); ui.log("↻ Replanning (${replans}/2)")
@@ -75,7 +76,7 @@ class Agent(
 
     /** A replan never ends the task with a direct answer: it must return phone steps. */
     private fun newPlan(goal: String, first: Boolean): List<Step> {
-        val p = call { brain.plan(goal, facts.toList(), Screen.digest(dev.windows(), Mode.READ, 120, w, h).text) }
+        val p = call { brain.plan(goal, facts.toList(), Screen.digest(dev.windows(), Mode.READ, 120, w, h).text, dev.apps()) }
             .filter { first || it.doing.isNotEmpty() }
         return p
     }
@@ -91,11 +92,11 @@ class Agent(
         var wins = dev.windows(); var d = act(wins)
         var noProg = 0; var acts = 0; var last = "none"; var scrolls = 0; var next: String? = null
         val tried = ArrayDeque<String>(); val seen = hashSetOf(d.hash)
-        if (pre) {
+        // "Already done?" is skipped on the screen where the last step ticked (else one screen ticks several steps); "done" still works.
+        if (pre && d.hash != tickedOn) {
             val d0 = d
             val (ok, r) = checkAndAct(st, Screen.digest(wins, Mode.READ, 200, w, h).text) { brain.act(goal, st, k, n, "none", emptyList(), d0.text) }
-            if (ok) return true else next = r
-        }
+            if (ok) { tickedOn = d.hash; return true } else next = r }
         if (((st.risky && cfg.confirmRisky) || cfg.confirmEvery) && !ui.ask("About to: ${st.doing}")) throw Halt("stopped", "You declined: ${st.doing}")
         while (true) {
             budget()
@@ -115,7 +116,7 @@ class Agent(
                 c
             } ?: continue
             if (cmd is Cmd.Done) { // the model says the step is finished: verify before ticking, so an early "done" can't skip work
-                if (call { brain.check(st.doneWhen, Screen.digest(wins, Mode.READ, 200, w, h).text, lastDone, st.doing) }) return true
+                if (call { brain.check(st.doneWhen, Screen.digest(wins, Mode.READ, 200, w, h).text, lastDone, st.doing) }) { tickedOn = d.hash; return true }
                 ui.log("· not yet: ${st.doneWhen}"); last = "ERR the step is not done yet: ${st.doneWhen}. Do the next action for it."; noProg++; continue
             }
             if (cmd is Cmd.Type && target(cmd, d)?.node?.password == true) {
@@ -130,7 +131,7 @@ class Agent(
             val t1 = now(); dev.settle(); val t2 = now()
             if (res.missingApp != null) { fact("${res.missingApp} is not installed; use its website"); return false }
             // The step is "open X" and X opened (or was already open): proof enough, even if its done-when text is too strict.
-            if (res.ok && cmd is Cmd.Open && opens(st, cmd)) { lastDone = "$label -> ${res.msg}"; return true }
+            if (res.ok && cmd is Cmd.Open && opens(st, cmd)) { lastDone = "$label -> ${res.msg}"; tickedOn = null; return true }
             val wins2 = dev.windows(); val d2 = act(wins2)
             ui.log("  time: wait ${t2 - t1} ms, read ${now() - t2} ms") // debug log only; the chat ignores it
             when {
@@ -145,7 +146,7 @@ class Agent(
                     val nextV = vision && (d2.actionable < 3 || d2.unlabeled * 2 > d2.actionable || noProg >= 2)
                     val (ok, r) = checkAndAct(st, Screen.digest(wins2, Mode.READ, 200, w, h).text,
                         if (nextV) null else ({ brain.act(goal, st, k, n, l2, t2s, d2.text) }))
-                    if (ok) return true
+                    if (ok) { tickedOn = d2.hash; return true }
                     next = r; ui.log("· not yet: ${st.doneWhen}")
                 }
             }

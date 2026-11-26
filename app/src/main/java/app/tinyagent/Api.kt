@@ -38,7 +38,8 @@ fun cleanBaseUrl(raw: String): String {
 fun cleanKey(raw: String) = raw.trim().trim('"', '\'', '`').trim().removePrefix("Bearer ").trim()
 
 interface ChatApi {
-    fun chat(msgs: List<Msg>, temperature: Double, maxTokens: Int, extra: Map<String, Any?> = emptyMap()): Reply
+    /** [think] = false asks a thinking model to answer directly (much faster); servers that can't switch it off just think. */
+    fun chat(msgs: List<Msg>, temperature: Double, maxTokens: Int, extra: Map<String, Any?> = emptyMap(), think: Boolean = true): Reply
     /** Model ids this endpoint offers (GET /models), or empty when unknown. Used to help when the model name is wrong. */
     fun models(): List<String> = emptyList()
 
@@ -57,34 +58,45 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
     /**
      * What we learned about this endpoint from its replies, shared by every task until the app restarts.
      * - HTTP 400s: newer OpenAI models want max_completion_tokens and only the default temperature.
-     * - Empty replies cut off by the token limit: a reasoning model spent the tiny budget thinking. From then on we
-     *   send a larger budget and ask for low reasoning effort ("low", then "none", then nothing if both are rejected).
+     * - Thinking models (hidden reasoning, <think>, far more tokens than the answer): think = false calls try the standard
+     *   off switches until one works: chat_template_kwargs.enable_thinking = false (vLLM, SGLang, llama.cpp), then
+     *   reasoning_effort "none", then "low". Thinking calls get 2,048 output tokens, raised once to 4,096.
      */
-    private class Quirks { var tokenKey = "max_tokens"; var sendTemp = true; var thinks = false; var budget = 2048; var effort = 0 }
-    private companion object { val learned = HashMap<String, Quirks>(); val EFFORTS = listOf("low", "none") }
+    private class Quirks { var tokenKey = "max_tokens"; var sendTemp = true; var thinks = false; var budget = 2048; var off = 0 }
+    private companion object {
+        val learned = HashMap<String, Quirks>()
+        val OFF: List<Pair<String, Any>> = listOf("chat_template_kwargs" to JSONObject().put("enable_thinking", false), "reasoning_effort" to "none", "reasoning_effort" to "low")
+    }
     private val q = synchronized(learned) { learned.getOrPut("$url|${ep.model}") { Quirks() } }
 
     /** True once this endpoint has shown it is a reasoning ("thinking") model: it works, but slower. */
     val thinks get() = q.thinks
 
-    override fun chat(msgs: List<Msg>, temperature: Double, maxTokens: Int, extra: Map<String, Any?>): Reply {
+    override fun chat(msgs: List<Msg>, temperature: Double, maxTokens: Int, extra: Map<String, Any?>, think: Boolean): Reply {
         var attempt = 0; var adapts = 0
         while (true) {
+            val off = !think && q.thinks && q.off < OFF.size
             val body = JSONObject().put("model", ep.model).put(q.tokenKey, if (q.thinks) maxOf(maxTokens, q.budget) else maxTokens)
                 .put("messages", JSONArray().also { a -> msgs.forEach { a.put(msgJson(it)) } })
             if (q.sendTemp) body.put("temperature", temperature)
-            if (q.thinks && q.effort < EFFORTS.size) body.put("reasoning_effort", EFFORTS[q.effort])
-            extraBody?.let { e -> e.keys().forEach { body.put(it, e.get(it)) } }
+            if (off) OFF[q.off].let { body.put(it.first, it.second) }
+            extraBody?.let { e -> e.keys().forEach { body.put(it, e.get(it)) } } // the user's Extra body wins
             extra.forEach { (k, v) -> body.put(k, json(v)) }
             try {
-                val (r, cutOff) = post(body.toString().toByteArray(), if (q.thinks) 90_000 else 30_000)
+                val wasThinking = q.thinks
+                val (r, cutOff, thought) = post(body.toString().toByteArray(), if (q.thinks) 90_000 else 30_000)
+                if (thought) { if (off) q.off++; q.thinks = true } // that switch didn't stop the thinking: next call tries the next one
                 if (!cutOff || adapts++ >= 3) return r
-                if (q.thinks) q.budget = minOf(q.budget * 2, 8192) else q.thinks = true // empty and cut off: think less, allow more
+                if (!think && q.off < OFF.size) continue // retry straight away with a thinking-off switch
+                if (wasThinking) q.budget = minOf(q.budget * 2, 4096)
             } catch (e: ApiError) {
                 if (e.code == 404 && !triedV1 && runCatching { URL(base).path.isEmpty() }.getOrDefault(false)) { // "http://host:8000" without /v1
                     triedV1 = true; url = "$base/v1/chat/completions"; continue
                 }
-                if (e.code == 400 && adapts++ < 4 && adapt(e.message.orEmpty())) continue
+                if (e.code == 400 && adapts++ < 5) {
+                    if (adapt(e.message.orEmpty())) continue
+                    if (off) { q.off++; continue } // this server rejects that thinking switch: try the next one
+                }
                 if (!e.retryable || attempt >= waits.size) throw e
                 Thread.sleep(waits[attempt++])
             }
@@ -94,7 +106,6 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
     private fun adapt(m: String) = when {
         q.tokenKey == "max_tokens" && m.contains("max_completion_tokens") -> { q.tokenKey = "max_completion_tokens"; true }
         q.sendTemp && m.contains("temperature") -> { q.sendTemp = false; true }
-        q.thinks && q.effort < EFFORTS.size && m.contains("reasoning") -> { q.effort++; true }
         else -> false
     }
 
@@ -109,8 +120,8 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
     /** The provider's own error message when the body is OpenAI-style JSON, else the raw text. */
     private fun errText(t: String) = try { JSONObject(t).getJSONObject("error").getString("message") } catch (e: JSONException) { t }.trim().take(200)
 
-    /** One HTTP call. The flag is true when the visible reply is empty because the model ran out of tokens or only reasoned. */
-    private fun post(bytes: ByteArray, readMs: Int): Pair<Reply, Boolean> {
+    /** One HTTP call -> (reply, cut off: nothing visible because it ran out of tokens or only reasoned, the model thought). */
+    private fun post(bytes: ByteArray, readMs: Int): Triple<Reply, Boolean, Boolean> {
         val t0 = System.currentTimeMillis()
         try {
             val c = URL(url).openConnection() as HttpURLConnection
@@ -130,8 +141,10 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
             val reasoned = (u?.optJSONObject("completion_tokens_details")?.optInt("reasoning_tokens", 0) ?: 0) > 0 ||
                 listOf("reasoning_content", "reasoning").any { k -> m != null && !m.isNull(k) && m.optString(k).isNotEmpty() }
             val cutOff = visible.isBlank() && (ch.optString("finish_reason") == "length" || reasoned || content.contains("<think>"))
-            return Reply(content, u?.optInt("prompt_tokens", -1) ?: -1, u?.optInt("completion_tokens", -1) ?: -1,
-                System.currentTimeMillis() - t0) to cutOff
+            val out = u?.optInt("completion_tokens", -1) ?: -1
+            val thought = reasoned || content.substringAfter("<think>", "").substringBefore("</think>").isNotBlank() ||
+                (out > 64 && out > 4 * (visible.length / 3.5) + 32) // far more tokens than the visible answer: hidden reasoning
+            return Triple(Reply(content, u?.optInt("prompt_tokens", -1) ?: -1, out, System.currentTimeMillis() - t0), cutOff, thought)
         } catch (e: SocketTimeoutException) { throw ApiError("timeout", true)
         } catch (e: JSONException) { throw ApiError("bad JSON reply", false)
         } catch (e: IOException) { throw ApiError("network: ${e.message}", true) }

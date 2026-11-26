@@ -32,5 +32,6 @@ Waves run in order. Tasks inside a wave are independent: each edits only its own
 - [x] 5.7e v0.2.4 CHECK fix: 8-token reply, yes/no found anywhere in the reply, last action given as evidence; 3+ scrolls in a row count as no progress; plan shown with ✓/▶; provider shortcuts and model autofill removed
 - [x] 5.7f v0.2.5 step ticking: step-aware lenient CHECK, `done` signal verified by CHECK, open steps tick when the target opens, larger output budgets, typing hint, compact chat, pill auto-hide
 - [x] 5.7g v0.2.6 speed: CHECK and next ACT in parallel, settle ignores timer/progress text, lighter tree walk, snapshot reuse, timing in debug log
+- [x] 5.7h v0.2.7 thinking off for quick calls (enable_thinking / reasoning_effort, learned per endpoint), installed apps in PLAN, stricter value-matching CHECK, no CHECK-only cascade of ticks, bare-number and run-on reply parsing
 - [ ] 5.6 Manual on-device test: onboarding, the 3 sample goals, volume-down kill switch, vision fallback (needs a phone)
 - [ ] 5.7 Open a PR (needs a GitHub repository; none was provided)

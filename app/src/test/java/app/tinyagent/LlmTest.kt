@@ -7,10 +7,10 @@ import org.junit.Test
 
 /** Records every request and answers from a script. */
 class FakeApi(private vararg val replies: String) : ChatApi {
-    class Call(val msgs: List<Msg>, val temp: Double, val max: Int, val extra: Map<String, Any?>)
+    class Call(val msgs: List<Msg>, val temp: Double, val max: Int, val extra: Map<String, Any?>, val think: Boolean)
     val calls = ArrayList<Call>()
-    override fun chat(msgs: List<Msg>, temperature: Double, maxTokens: Int, extra: Map<String, Any?>): Reply {
-        calls += Call(msgs, temperature, maxTokens, extra)
+    override fun chat(msgs: List<Msg>, temperature: Double, maxTokens: Int, extra: Map<String, Any?>, think: Boolean): Reply {
+        calls += Call(msgs, temperature, maxTokens, extra, think)
         val tokens = msgs.sumOf { Screen.tokens(it.text) } + 10
         return Reply(replies[minOf(calls.size - 1, replies.size - 1)], tokens, 3, 5)
     }
@@ -137,6 +137,29 @@ class LlmTest {
         bad("tap on it")
     }
 
+    @Test fun planGetsTheInstalledApps() {
+        val api = FakeApi("open Clock => Clock is open")
+        Llm(api).plan("Set an alarm for 7:30", emptyList(), "App: none | popup: no | keyboard: no", listOf("Clock", "Chrome", "YouTube", "WhatsApp"))
+        assertEquals("Task: Set an alarm for 7:30\nFacts: none\nApps: Chrome, Clock, WhatsApp, YouTube\nScreen now:\nApp: none | popup: no | keyboard: no",
+            api.calls[0].msgs[1].text)
+    }
+
+    @Test fun appListKeepsShortNamesWithinBudget() {
+        val many = (1..200).map { "Some Long Vendor App Number $it" } + listOf("Clock", "Phone", "Maps", "Settings")
+        val list = appList(many, 40)
+        assertTrue(list, Screen.tokens(list) <= 42)
+        assertTrue(list.startsWith("Clock, Maps, Phone, Settings"))
+        assertEquals("", appList(emptyList(), 40))
+    }
+
+    @Test fun bareNumbersAndRunOnReplies() {
+        ok("<1>", Cmd.Tap(1), mark = 20); ok("[3]", Cmd.Tap(3), mark = 20); ok("2", Cmd.Tap(2))
+        bad("99")
+        ok("open Clock tap Alarms scroll down tap Add alarm", Cmd.Open("Clock"))
+        ok("tap 2 then scroll down", Cmd.Tap(2))
+        ok("type 1 open the door", Cmd.Type(1, "open the door")) // typed text is kept whole
+    }
+
     @Test fun doneSignal() {
         ok("done", Cmd.Done); ok("Done.", Cmd.Done); ok("finished", Cmd.Done); ok("Step completed.", Cmd.Done)
         assertTrue(Screen.tokens(Prompts.ACT) <= 150 && Screen.tokens(Prompts.CHECK) <= 150)
@@ -170,6 +193,7 @@ class LlmTest {
         val plan = Llm(api).plan("weather in Tokyo", emptyList(), "App: Launcher | popup: no | keyboard: no")
         assertEquals(listOf(Step("weather in Tokyo", "the goal is done", false)), plan)
         assertEquals(listOf(0.3, 0.5), api.calls.map { it.temp })
+        assertEquals(listOf(false, true), api.calls.map { it.think }) // fast first; thinking only on the retry
         assertTrue(api.calls.all { it.max == 240 })
     }
 
@@ -182,6 +206,7 @@ class LlmTest {
         llm.report("g", "done", "App: X | popup: no | keyboard: no")
         llm.look(st, byteArrayOf(1, 2, 3))
         assertEquals(listOf(48, 16, 80, 24), api.calls.map { it.max })
+        assertTrue(api.calls.none { it.think }) // quick calls never ask a thinking model to think
         assertEquals(listOf(0.1, 0.1, 0.3, 0.1), api.calls.map { it.temp })
         assertTrue(api.calls.last().msgs[1].jpeg != null)
     }

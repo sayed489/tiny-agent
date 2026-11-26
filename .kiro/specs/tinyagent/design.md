@@ -72,6 +72,15 @@ These are as specified in brief section 2, with these additions:
 - `windows()` reuses the last snapshot until a window event arrives (at most 3 s old).
 - The debug log records `time: wait … ms, read … ms` after every action.
 
+## Robustness (v0.2.7, from a real alarm-task log)
+
+| Failure in the log | General fix |
+|---|---|
+| Every call 2-17 s: thousands of hidden thinking tokens for a 3-word reply | ACT, CHECK, REPORT and LOOK ask for thinking off (`chat_template_kwargs.enable_thinking=false`, then `reasoning_effort` none/low), learned per endpoint. PLAN tries fast first and may think only on its retry. Thinking budget is capped at 4,096. |
+| Planned a Google search for "set an alarm" | PLAN gets the installed launcher apps (shortest names first, up to 130 tokens) and the rule "the best one in Apps; a website only if none fits". Steps keep the task's names, numbers and text. |
+| 3 steps ticked on one screen with no action, including "alarm set for 7:30" on a 09:11 time picker | CHECK: names, numbers and times must match. The "already done?" pre-check is skipped on the screen where the last step ticked; the model must act or reply `done`, and CHECK verifies. |
+| Vision replied `<1>`; ACT replied `open Clock tap Alarms scroll down` | A bare number is a tap; a reply with several commands keeps the first. |
+
 ## Error handling
 
 - `Halt(status, message)` ends a task: stopped, locked, or "stuck at step k".
