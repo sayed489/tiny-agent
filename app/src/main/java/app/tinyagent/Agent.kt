@@ -6,6 +6,7 @@ interface Ui { fun log(s: String); fun status(s: String); fun ask(q: String): Bo
 data class Config(
     val main: Endpoint, val planModel: String = "", val vision: Endpoint? = null, val imgW: Int = 352, val imgH: Int = 768,
     val confirmRisky: Boolean = true, val confirmEvery: Boolean = false, val constrainCheck: Boolean = false,
+    val priceIn: Double = 0.0, val priceOut: Double = 0.0, // USD per 1M tokens, for the cost line (0 = not shown)
 )
 
 /** Last 200 log lines, shared between the service (writer) and the activity (reader). */
@@ -27,7 +28,8 @@ class Agent(
     private val usage: Usage = Usage(), private val csv: (String) -> Unit = {},
     private val now: () -> Long = System::currentTimeMillis,
 ) {
-    companion object { const val MAX_ACTIONS = 40; const val MAX_MS = 6 * 60_000L; const val STEP_ACTIONS = 8 }
+    companion object { const val MAX_ACTIONS = 40; const val MAX_MS = 6 * 60_000L; const val STEP_ACTIONS = 8; const val WAITS = 4 }
+    private var maxActions = MAX_ACTIONS; private var maxMs = MAX_MS // grow with the plan: long goals get more room
     private class Pick(val cmd: Cmd, val node: N?, val xy: IntArray?)
     @Volatile private var stopped = false
     fun stop() { stopped = true }
@@ -45,18 +47,20 @@ class Agent(
             ui.status("Planning…") // the "Goal:" log line is written by the chat screen
             var plan = newPlan(goal, first = true)
             plan.singleOrNull()?.takeIf { it.doing.isEmpty() }?.let { throw Halt("answered", it.doneWhen) } // no phone action needed
-            logPlan(plan)
+            logPlan(plan); grow(plan.size)
             dev.key("home"); dev.settle()
             var k = 0; var fresh = false
             while (k < plan.size) {
                 val st = plan[k]; curK = k + 1
                 ui.status("Step ${k + 1}/${plan.size}: ${st.doing}")
-                val pre = k > 0 || fresh; if (fresh) tickedOn = null; fresh = false
-                if (step(goal, st, k + 1, plan.size, pre)) { ui.log("✓ ${k + 1} ${st.doing}"); k++; continue }
+                // "Already done?" only right after a replan (the new plan may repeat finished steps). Otherwise the step starts
+                // with ACT, and a finished step needs the model's "done" AND CHECK: one judgment alone ticked steps falsely.
+                val pre = fresh; tickedOn = null; fresh = false
+                if (step(goal, st, k + 1, plan.size, pre)) { ui.log("✓ ${k + 1} ${st.doing}"); done += st.doing; k++; continue }
                 if (++replans > 2) throw Halt("stuck at step ${k + 1}", "Stuck at step ${k + 1}: ${st.doing}")
                 ui.status("Replanning…"); ui.log("↻ Replanning (${replans}/2)")
                 plan = plan.take(k) + newPlan(goal, first = false).ifEmpty { throw Halt("stuck at step ${k + 1}", "Stuck at step ${k + 1}: ${st.doing}") }
-                logPlan(plan) // the whole plan, so step numbers in "✓ k" stay right
+                logPlan(plan); grow(plan.size) // the whole plan, so step numbers in "✓ k" stay right
                 fresh = true
             }
             status = "done"
@@ -68,18 +72,21 @@ class Agent(
             status = "stopped"; msg = "Stopped"
         }
         ui.log("Result ($status): $msg"); ui.status(msg)
+        ui.log("Usage: ${usage.calls} calls, ${usage.tokIn} in + ${usage.tokOut} out tokens" +
+            if (cfg.priceIn + cfg.priceOut > 0) ", $" + "%.4f".format((usage.tokIn * cfg.priceIn + usage.tokOut * cfg.priceOut) / 1e6) else "")
         val secs = "${(now() - t0) / 1000}"
         csv(listOf(goal, cfg.main.model, "$actions", "${usage.calls}", "${usage.maxPrompt}", "${usage.vision}", "$replans", secs, status)
             .joinToString(",") { if (it.contains(',') || it.contains('"')) "\"" + it.replace("\"", "\"\"") + "\"" else it })
         return msg
     }
 
-    /** A replan never ends the task with a direct answer: it must return phone steps. */
+    /** A replan never ends the task with a direct answer, and is told which steps are done so it plans only the rest. */
     private fun newPlan(goal: String, first: Boolean): List<Step> {
-        val p = call { brain.plan(goal, facts.toList(), Screen.digest(dev.windows(), Mode.READ, 120, w, h).text, dev.apps()) }
-            .filter { first || it.doing.isNotEmpty() }
-        return p
+        val f = facts.toList() + if (done.isEmpty()) emptyList() else listOf("already done: " + done.joinToString(", ") { it.take(40) } + "; plan only the rest")
+        return call { brain.plan(goal, f, Screen.digest(dev.windows(), Mode.READ, 120, w, h).text, dev.apps()) }.filter { first || it.doing.isNotEmpty() }
     }
+    private val done = ArrayList<String>()
+    private fun grow(steps: Int) { maxActions = maxOf(MAX_ACTIONS, steps * 10); maxMs = maxOf(MAX_MS, steps * 90_000L) }
     private fun logPlan(p: List<Step>) = p.forEachIndexed { i, s -> ui.log("Plan ${i + 1}: ${if (s.risky) "!" else ""}${s.doing} => ${s.doneWhen}") }
 
     /** REPORT skips the action/time budget (it runs after a budget stop) but still honours Stop. */
@@ -90,10 +97,9 @@ class Agent(
     /** Runs one step. true = step done, false = replan needed. [pre]: first check whether it is already done (while ACT runs). */
     private fun step(goal: String, st: Step, k: Int, n: Int, pre: Boolean): Boolean {
         var wins = dev.windows(); var d = act(wins)
-        var noProg = 0; var acts = 0; var last = "none"; var scrolls = 0; var next: String? = null
+        var noProg = 0; var acts = 0; var last = "none"; var scrolls = 0; var waits = 0; var next: String? = null
         val tried = ArrayDeque<String>(); val seen = hashSetOf(d.hash)
-        // "Already done?" is skipped on the screen where the last step ticked (else one screen ticks several steps); "done" still works.
-        if (pre && d.hash != tickedOn) {
+        if (pre) {
             val d0 = d
             val (ok, r) = checkAndAct(st, Screen.digest(wins, Mode.READ, 200, w, h).text) { brain.act(goal, st, k, n, "none", emptyList(), d0.text) }
             if (ok) { tickedOn = d.hash; return true } else next = r }
@@ -101,7 +107,7 @@ class Agent(
         while (true) {
             budget()
             if (noProg >= 4 || acts >= STEP_ACTIONS) { fact("stuck at: ${st.doing}"); return false }
-            val useV = vision && (d.actionable < 3 || d.unlabeled * 2 > d.actionable || noProg >= 2)
+            val useV = vision && (d.actionable < 3 || d.unlabeled * 2 > d.actionable || noProg >= 3)
             val pick = if (useV) look(st, wins) else null
             val cmd = pick?.cmd ?: run {
                 val reply = next ?: call { brain.act(goal, st, k, n, last, tried.toList(), d.text) }
@@ -115,9 +121,18 @@ class Agent(
                 if (c == null) { last = "ERR $err"; noProg++ }
                 c
             } ?: continue
-            if (cmd is Cmd.Done) { // the model says the step is finished: verify before ticking, so an early "done" can't skip work
+            // "wait" (loading, generating), or "done" that CHECK rejects while the screen is still changing: wait, then check again.
+            // Waiting isn't a failure, so it doesn't push the step toward vision or a replan (up to WAITS per step).
+            if (cmd is Cmd.Wait || cmd is Cmd.Done) {
+                if (cmd is Cmd.Wait || waits < WAITS && dev.busy()) {
+                    if (++waits > WAITS) { last = "ERR waited enough; do the next action for the step"; noProg++; continue }
+                    ui.log("· waiting for the screen…"); Thread.sleep(1500); dev.settle(8000); wins = dev.windows(); d = act(wins)
+                }
                 if (call { brain.check(st.doneWhen, Screen.digest(wins, Mode.READ, 200, w, h).text, lastDone, st.doing) }) { tickedOn = d.hash; return true }
-                ui.log("· not yet: ${st.doneWhen}"); last = "ERR the step is not done yet: ${st.doneWhen}. Do the next action for it."; noProg++; continue
+                ui.log("· not yet: ${st.doneWhen}")
+                last = if (cmd is Cmd.Wait) "waited -> ${st.doneWhen} not shown yet" else "ERR the step is not done yet: ${st.doneWhen}. Do the next action for it."
+                if (cmd is Cmd.Done) noProg++
+                continue
             }
             if (cmd is Cmd.Type && target(cmd, d)?.node?.password == true) {
                 if (!ui.ask("Type your password, then tap Continue")) throw Halt("stopped", "Stopped")
@@ -132,7 +147,11 @@ class Agent(
             if (res.missingApp != null) { fact("${res.missingApp} is not installed; use its website"); return false }
             // The step is "open X" and X opened (or was already open): proof enough, even if its done-when text is too strict.
             if (res.ok && cmd is Cmd.Open && opens(st, cmd)) { lastDone = "$label -> ${res.msg}"; tickedOn = null; return true }
-            val wins2 = dev.windows(); val d2 = act(wins2)
+            var wins2 = dev.windows(); var d2 = act(wins2)
+            // Some apps (Compose, Flutter, web views) accept the accessibility click but ignore it: tap the spot like a finger.
+            if (res.ok && cmd is Cmd.Tap && pick?.xy == null && d2.hash == d.hash) (pick?.node ?: d.items.firstOrNull { it.id == cmd.id }?.node)?.let { n ->
+                if (dev.tapXY((n.l + n.r) / 2, (n.t + n.b) / 2).ok) { ui.log("  retapped with a gesture"); dev.settle(); wins2 = dev.windows(); d2 = act(wins2) }
+            }
             ui.log("  time: wait ${t2 - t1} ms, read ${now() - t2} ms") // debug log only; the chat ignores it
             when {
                 !res.ok -> { last = "$label failed: ${res.msg}"; noProg++ }
@@ -143,7 +162,7 @@ class Agent(
                     if (cmd is Cmd.Scroll && ++scrolls > 2) { last = "$label -> screen changed; scrolled $scrolls times in a row, try another command"; noProg++ }
                     lastDone = "$label -> ${res.msg}"
                     val l2 = last; val t2s = (tried + label).takeLast(3) // what the next ACT would be asked anyway
-                    val nextV = vision && (d2.actionable < 3 || d2.unlabeled * 2 > d2.actionable || noProg >= 2)
+                    val nextV = vision && (d2.actionable < 3 || d2.unlabeled * 2 > d2.actionable || noProg >= 3)
                     val (ok, r) = checkAndAct(st, Screen.digest(wins2, Mode.READ, 200, w, h).text,
                         if (nextV) null else ({ brain.act(goal, st, k, n, l2, t2s, d2.text) }))
                     if (ok) { tickedOn = d2.hash; return true }
@@ -198,13 +217,20 @@ class Agent(
         is Cmd.Scroll -> dev.scroll(c.dir, null)
         is Cmd.Key -> dev.key(c.k)
         Cmd.Done -> Res(true, "done")
+        Cmd.Wait -> Res(true, "waited")
     }
 
-    /** True when the step itself reads as an open command and the opened target shares a 4+ letter word with it (youtube.com ~ YouTube). */
+    /**
+     * True when the whole step is "open X" and X opened (youtube.com ~ YouTube). Every 4+ letter word of the step's target must be
+     * in what was opened, so "open YouTube and subscribe to …" or "open v0 in Chrome" does not tick on "open YouTube"/"open Chrome".
+     */
     private fun opens(st: Step, c: Cmd.Open): Boolean {
         val want = parse(st.doing, emptyList()).first as? Cmd.Open ?: return false
-        fun words(s: String) = String(s.lowercase().map { if (it.isLetterOrDigit()) it else ' ' }.toCharArray()).split(' ').filter { it.length >= 4 }.toSet()
-        return words(want.target).intersect(words(c.target)).isNotEmpty()
+        val filler = setOf("app", "apps", "application", "website", "site", "page", "home", "homepage", "https", "http", "www")
+        fun words(s: String) = String(s.lowercase().map { if (it.isLetterOrDigit()) it else ' ' }.toCharArray()).split(' ')
+            .filter { it.length >= 4 && it !in filler }.map { it.removeSuffix("com") }.filter { it.length >= 3 }.toSet()
+        val need = words(want.target)
+        return need.isNotEmpty() && words(c.target).containsAll(need)
     }
 
     /** Commands in label form: ids are renumbered on every screen, labels are not. */
@@ -215,6 +241,7 @@ class Agent(
         is Cmd.Scroll -> "scroll ${c.dir}"
         is Cmd.Key -> "key ${c.k}"
         Cmd.Done -> "done"
+        Cmd.Wait -> "wait"
     }
 
     private fun target(c: Cmd.Type, d: Digest): Item? = if (c.id != null) d.items.firstOrNull { it.id == c.id }
@@ -222,8 +249,8 @@ class Agent(
 
     private fun budget() {
         if (stopped || Thread.currentThread().isInterrupted) throw Halt("stopped", "Stopped")
-        if (actions >= MAX_ACTIONS) throw Halt("stuck at step $curK", "Action limit ($MAX_ACTIONS) reached")
-        if (now() - t0 > MAX_MS) throw Halt("stuck at step $curK", "Time limit (6 min) reached")
+        if (actions >= maxActions) throw Halt("stuck at step $curK", "Action limit ($maxActions) reached")
+        if (now() - t0 > maxMs) throw Halt("stuck at step $curK", "Time limit (${maxMs / 60_000} min) reached")
     }
 
     /** Every model call goes through here: budget check first, then a user-approved retry on API errors. */

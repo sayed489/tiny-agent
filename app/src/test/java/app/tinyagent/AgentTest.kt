@@ -217,6 +217,57 @@ class AgentTest {
         assertEquals(listOf("act:open Clock", "check:open Clock", "act:set 7:30", "check:set 7:30", "act:save", "check:save"), events.toList())
     }
 
+    @Test fun preCheckOnlyAfterReplanSoOneJudgmentCannotTickAStep() {
+        // CHECK would happily say yes to everything; step 2 must still be acted on (its ACT is asked) before it ticks.
+        val dev = weatherDevice()
+        val inner = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com", "Google", false), Step("subscribe to the channel", "Google", false)))),
+            { s, _ -> if (s.contains("Launcher")) "open google.com" else "done" })
+        var acts = 0
+        val brain = object : Brain by inner {
+            override fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String) = inner.act(goal, step, k, n, last, tried, screen).also { acts++ }
+        }
+        assertEquals("report: done", Agent(dev, brain, FakeUi(), cfg).run("x"))
+        assertEquals(2, acts) // step 2 needed the model's own "done" as well as CHECK
+    }
+
+    @Test fun compoundOpenStepDoesNotTickOnOpen() {
+        val dev = weatherDevice()
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com and search weather Tokyo", "Tokyo 18°C", false)))), { s, _ ->
+            when { s.contains("Launcher") -> "open google.com"; s.contains("= \"weather Tokyo\"") -> "key enter"; else -> "type Search weather Tokyo" }
+        })
+        assertEquals("report: done", Agent(dev, brain, FakeUi(), cfg).run("weather"))
+        assertEquals(listOf("open google.com", "type Search weather Tokyo", "key enter"), dev.actions) // the open alone did not tick it
+    }
+
+    @Test fun waitGivesSlowScreensTimeWithoutCountingAsFailure() {
+        var polls = 0
+        val loading = listOf(app(textNode("Generating…", 300), button("Stop", 600), label = "Gemini"))
+        val ready = listOf(app(textNode("Here is your cat image", 300), button("Download", 600), label = "Gemini"))
+        val dev = object : Device by FakeDevice("l", mapOf("l" to loading)) {
+            override fun windows() = if (polls >= 2) ready else loading
+            override fun settle(maxMs: Long) { polls++ }
+        }
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("ask for a cat image", "cat image", false)))), { _, _ -> "wait" })
+        val ui = FakeUi()
+        assertEquals("report: done", Agent(dev, brain, ui, cfg).run("cat"))
+        assertTrue(ui.logs.contains("· waiting for the screen…"))
+    }
+
+    @Test fun usageLineWithPrice() {
+        val ui = FakeUi()
+        val usage = Usage().apply { calls = 3; tokIn = 1_000_000; tokOut = 200_000 }
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("", "Hi", false)))), { _, _ -> "tap 1" })
+        Agent(weatherDevice(), brain, ui, cfg.copy(priceIn = 0.10, priceOut = 0.50), usage).run("Hello")
+        assertTrue(ui.logs.toString(), ui.logs.contains("Usage: 3 calls, 1000000 in + 200000 out tokens, $0.2000"))
+    }
+
+    @Test fun replanIsToldWhatIsDone() {
+        val dev = FakeDevice("home", mapOf("home" to home))
+        val b2 = FakeBrain(ArrayDeque(listOf(listOf(Step("open the clock", "Launcher home", false), Step("set alarm", "Alarm", false)))), { _, _ -> "done" })
+        Agent(dev, b2, FakeUi(), cfg).run("alarm")
+        assertTrue(b2.planFacts.drop(1).any { f -> f.any { it.startsWith("already done: open the clock") } })
+    }
+
     @Test fun lastAndTriedUseLabelForm() {
         val dev = weatherDevice()
         val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com", "Google", false), Step("search", "Tokyo 18°C", false)))), { s, _ ->
@@ -230,7 +281,7 @@ class AgentTest {
         val dev = FakeDevice("home", mapOf("home" to home))
         val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open the clock", "Alarm", false)))), { _, _ -> "tap 2" })
         val msg = Agent(dev, brain, FakeUi(), cfg).run("set an alarm")
-        assertEquals(listOf("tap Clock"), dev.actions) // the same (screen, command) never runs twice in a task
+        assertEquals(listOf("tap Clock", "tapXY 140,840"), dev.actions) // one gesture retap, then the same (screen, command) never runs again
         assertEquals(3, brain.planFacts.size) // first plan + 2 replans, then stop
         assertTrue(brain.planFacts[1].contains("stuck at: open the clock"))
         assertTrue(brain.actLasts.contains("tap \"Clock\" -> screen unchanged"))

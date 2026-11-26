@@ -12,6 +12,8 @@ sealed class Cmd {
     data class Key(val k: String) : Cmd()
     /** Not a phone tool: the model says the current step is finished. The harness verifies it with CHECK before ticking. */
     object Done : Cmd() { override fun toString() = "Done" }
+    /** Not a phone tool: the screen is still loading or generating; the harness waits, then checks the step. */
+    object Wait : Cmd() { override fun toString() = "Wait" }
 }
 
 interface Brain {
@@ -23,11 +25,11 @@ interface Brain {
 }
 
 /** Per-task counters written by Llm and read by Agent for runs.csv. */
-class Usage { @Volatile var calls = 0; @Volatile var maxPrompt = 0; @Volatile var vision = 0 }
+class Usage { @Volatile var calls = 0; @Volatile var maxPrompt = 0; @Volatile var vision = 0; @Volatile var tokIn = 0L; @Volatile var tokOut = 0L }
 
 /** Static system prompts: byte-identical on every call of the same type (prefix-cache friendly). */
 object Prompts {
-    const val PLAN = "You plan phone tasks. Write 1 to 6 steps, one per line:\n" +
+    const val PLAN = "You plan phone tasks. Write 1 to 10 steps, one per line:\n" +
         "<action> => <short result the screen shows>\n" +
         "One step per part of the task. Keep names, numbers and text from the task in the steps.\n" +
         "Use the app the user named, else the best one in Apps; a website only if none fits.\n" +
@@ -43,13 +45,14 @@ object Prompts {
         "type <id> <text>\n" +
         "scroll down|up|left|right\n" +
         "key back|home|enter|notifications\n" +
+        "wait (the screen is loading or generating)\n" +
         "done (the current step is already finished)\n" +
         "Use ids from Screen and exact names, numbers and text from Goal. Do only the current step. " +
         "To type, there must be an input; if not, tap a search or text box first. " +
         "If a popup is in the way, close it or answer it safely. Never repeat a command in Tried."
     const val CHECK = "Is the step done? Answer Y or N. Y only if the screen shows its result; names, numbers and times must match."
     const val REPORT = "Tell the user the result of their phone task in one short sentence, using only what the screen shows. If it failed, say what is missing."
-    const val LOOK = "This is a phone screenshot with numbered boxes. Reply with ONE command: tap <number>, scroll down, or key back."
+    const val LOOK = "This is a phone screenshot with numbered boxes. Reply with ONE command: tap <number>, scroll down, key back, or wait."
 }
 
 class Llm(
@@ -69,8 +72,8 @@ class Llm(
         val f = facts.joinToString("; ").ifEmpty { "none" }
         val a = appList(apps, 130).ifEmpty { "unknown" } // installed apps, so the planner picks a real app over a website
         val user = fit(Prompts.PLAN, screen) { "Task: $goal\nFacts: $f\nApps: $a\nScreen now:\n$it" }
-        var r = send("PLAN", planApi, Prompts.PLAN, user, 0.3, 240) // fast first; a thinking model may think on the retry
-        return parsePlan(r).ifEmpty { r = send("PLAN", planApi, Prompts.PLAN, user, 0.5, 240, think = true); parsePlan(r) }.ifEmpty {
+        var r = send("PLAN", planApi, Prompts.PLAN, user, 0.3, 360) // fast first; a thinking model may think on the retry
+        return parsePlan(r).ifEmpty { r = send("PLAN", planApi, Prompts.PLAN, user, 0.5, 360, think = true); parsePlan(r) }.ifEmpty {
             log("⚠ Could not read the model's plan " + if (r.isBlank()) "(empty reply)" else "“${r.replace('\n', ' ').take(80)}”")
             listOf(Step(goal, "the goal is done", false))
         }
@@ -114,15 +117,18 @@ class Llm(
         val e = est(sys, user, if (jpeg != null) imgTokens else 0)
         val r = api.chat(listOf(Msg("system", sys), Msg("user", user, jpeg)), temp, max, extra, think)
         val p = if (r.promptTokens >= 0) r.promptTokens else e
-        synchronized(usage) { usage.calls++; if (p > usage.maxPrompt) usage.maxPrompt = p } // CHECK and ACT can run in parallel
+        synchronized(usage) { // CHECK and ACT can run in parallel
+            usage.calls++; if (p > usage.maxPrompt) usage.maxPrompt = p
+            usage.tokIn += p; usage.tokOut += if (r.completionTokens >= 0) r.completionTokens else Screen.tokens(r.text)
+        }
         log("$type est=$e prompt=${r.promptTokens} out=${r.completionTokens} ${r.ms}ms: ${r.text.replace('\n', ' ').take(120)}")
         if (p > 450) log("WARN $type prompt is $p tokens (limit 450)")
         return r.text
     }
 }
 
-private val VERBS = setOf("open", "tap", "type", "scroll", "key", "done")
-private val ALIAS = mapOf("click" to "tap", "press" to "key", "swipe" to "scroll", "launch" to "open", "input" to "type", "finished" to "done", "complete" to "done", "completed" to "done")
+private val VERBS = setOf("open", "tap", "type", "scroll", "key", "done", "wait")
+private val ALIAS = mapOf("click" to "tap", "press" to "key", "swipe" to "scroll", "launch" to "open", "input" to "type", "finished" to "done", "complete" to "done", "completed" to "done", "waiting" to "wait", "loading" to "wait")
 private val DIRS = setOf("down", "up", "left", "right")
 private val KEYS = setOf("back", "home", "enter", "notifications")
 /** Drop <think>...</think> (and a dangling </think>), return the first non-empty line. */
@@ -198,6 +204,7 @@ fun parse(reply: String, items: List<Item>, maxMark: Int = 0): Pair<Cmd?, String
     }
     return when (verb) {
         "done" -> Cmd.Done to null
+        "wait" -> Cmd.Wait to null
         "open" -> unq(rest).trimEnd('.').let { if (it.isEmpty()) null to "open needs an app or website" else Cmd.Open(it) to null }
         "scroll" -> word(rest).let { if (it in DIRS) Cmd.Scroll(it) to null else null to "scroll needs down, up, left or right" }
         "key" -> word(rest).let { if (it in KEYS) Cmd.Key(it) to null else null to "key needs back, home, enter or notifications" }
@@ -239,13 +246,13 @@ fun parsePlan(reply: String): List<Step> {
         val arrow = ARROWS.map { l.indexOf(it) to it.length }.filter { it.first > 0 }.minByOrNull { it.first } ?: return@mapNotNull null
         l.substring(arrow.first + arrow.second).trim().takeIf { it.isNotEmpty() }?.let { step(l.substring(0, arrow.first), it) }
     }
-    if (arrowed.isNotEmpty()) return arrowed.take(6)
+    if (arrowed.isNotEmpty()) return arrowed.take(10)
     raw.map(::cleanLine).firstOrNull { it.startsWith("answer:", ignoreCase = true) }
         ?.let { a -> return listOf(Step("", a.substringAfter(':').trim().ifEmpty { "OK" }, false)) }
     val listed = raw.filter { it[0].isDigit() || it[0] in "-*•" || it.startsWith("step ", ignoreCase = true) }
-    if (listed.isNotEmpty()) return listed.mapNotNull { step(cleanLine(it), null) }.take(6)
+    if (listed.isNotEmpty()) return listed.mapNotNull { step(cleanLine(it), null) }.take(10)
     val plain = raw.map(::cleanLine).filter { !it.endsWith(":") }
     // No markers: one short line ending in ? or ! is a chat reply; two or more short lines are steps; anything else is unreadable.
     if (plain.size == 1 && plain[0].contains(' ') && (plain[0].endsWith("?") || plain[0].endsWith("!"))) return listOf(Step("", plain[0], false))
-    return if (plain.size >= 2 && plain.all { it.length <= 80 && !it.endsWith("?") }) plain.mapNotNull { step(it, null) }.take(6) else emptyList()
+    return if (plain.size >= 2 && plain.all { it.length <= 80 && !it.endsWith("?") }) plain.mapNotNull { step(it, null) }.take(10) else emptyList()
 }

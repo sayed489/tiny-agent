@@ -20,7 +20,7 @@ Waves run in order. Tasks inside a wave are independent: each edits only its own
 - [x] 4.1 `Main.kt` onboarding, settings, Keystore, goal, run/stop, log, copy, dump screen (R7.4, R11)
 
 ## Wave 5: verification and delivery
-- [x] 5.1 Hold main code to 1,600 lines or fewer (1,200 before the v0.2.0 UI) and 6 files (R1)
+- [x] 5.1 Hold main code to 1,700 lines or fewer (1,200 before the v0.2.0 UI) and 6 files (R1)
 - [x] 5.2 Run unit tests (55 passing) and lint (0 errors) (R13)
 - [x] 5.3 `.github/workflows/build.yml` with hard-rule checks (R14)
 - [x] 5.4 README (R15)
@@ -34,5 +34,6 @@ Waves run in order. Tasks inside a wave are independent: each edits only its own
 - [x] 5.7g v0.2.6 speed: CHECK and next ACT in parallel, settle ignores timer/progress text, lighter tree walk, snapshot reuse, timing in debug log
 - [x] 5.7h v0.2.7 thinking off for quick calls (enable_thinking / reasoning_effort, learned per endpoint), installed apps in PLAN, stricter value-matching CHECK, no CHECK-only cascade of ticks, bare-number and run-on reply parsing
 - [x] 5.7i v0.2.8 drop parameters a server rejects (top_k on Azure), thinking-off switches for OpenAI/Azure/Fireworks/Groq/Gemini, DeepSeek/GLM/Kimi, vLLM/SGLang/llama.cpp, DashScope, OpenRouter, Ollama with host hints; Test connection shows speed, switch and dropped params
+- [x] 5.7j v0.2.9 pre-check only after replans, compound open steps don't tick, open succeeds on hand-off apps, wait command + auto-wait on busy screens, gesture retap when a click is ignored, up to 10 steps with budgets that grow, replans told what's done, token + cost line
 - [ ] 5.6 Manual on-device test: onboarding, the 3 sample goals, volume-down kill switch, vision fallback (needs a phone)
 - [ ] 5.7 Open a PR (needs a GitHub repository; none was provided)

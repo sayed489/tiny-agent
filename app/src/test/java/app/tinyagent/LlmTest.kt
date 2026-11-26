@@ -107,7 +107,8 @@ class LlmTest {
         assertTrue(p[2].risky)
         assertEquals("send \"running late\"", p[2].doing)
         assertEquals("the message shows as sent", p[2].doneWhen)
-        assertEquals(6, parsePlan((1..9).joinToString("\n") { "do $it => done $it" }).size)
+        assertEquals(9, parsePlan((1..9).joinToString("\n") { "do $it => done $it" }).size)
+        assertEquals(10, parsePlan((1..14).joinToString("\n") { "do $it => done $it" }).size) // long goals get up to 10 steps
         assertTrue(parsePlan("I cannot help").isEmpty())
     }
 
@@ -160,6 +161,20 @@ class LlmTest {
         ok("type 1 open the door", Cmd.Type(1, "open the door")) // typed text is kept whole
     }
 
+    @Test fun waitSignal() {
+        ok("wait", Cmd.Wait); ok("Wait.", Cmd.Wait); ok("loading", Cmd.Wait); ok("I will wait", Cmd.Wait)
+        ok("wait", Cmd.Wait, mark = 20) // vision can wait too
+        assertTrue(Screen.tokens(Prompts.ACT) <= 150 && Screen.tokens(Prompts.LOOK) <= 150 && Screen.tokens(Prompts.PLAN) <= 150)
+    }
+
+    @Test fun usageCountsTokens() {
+        val u = Usage()
+        val llm = Llm(FakeApi("tap 1"), usage = u)
+        llm.act("g", Step("a", "b", false), 1, 1, "none", emptyList(), "S"); llm.check("b", "S")
+        assertEquals(6, u.tokOut) // FakeApi reports 3 completion tokens per call
+        assertTrue(u.tokIn > 0)
+    }
+
     @Test fun doneSignal() {
         ok("done", Cmd.Done); ok("Done.", Cmd.Done); ok("finished", Cmd.Done); ok("Step completed.", Cmd.Done)
         assertTrue(Screen.tokens(Prompts.ACT) <= 150 && Screen.tokens(Prompts.CHECK) <= 150)
@@ -194,7 +209,7 @@ class LlmTest {
         assertEquals(listOf(Step("weather in Tokyo", "the goal is done", false)), plan)
         assertEquals(listOf(0.3, 0.5), api.calls.map { it.temp })
         assertEquals(listOf(false, true), api.calls.map { it.think }) // fast first; thinking only on the retry
-        assertTrue(api.calls.all { it.max == 240 })
+        assertTrue(api.calls.all { it.max == 360 })
     }
 
     @Test fun samplingPerCallType() {

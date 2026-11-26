@@ -29,6 +29,7 @@ interface Device {
     fun settle(maxMs: Long = 2500)
     fun shot(boxes: List<IntArray>, outW: Int, outH: Int, crop: IntArray? = null): ByteArray? // JPEG with numbered boxes; null if protected
     fun apps(): List<String> = emptyList() // launcher labels, given to PLAN
+    fun busy(): Boolean = false // the screen is still changing or a progress indicator is visible
 }
 
 class Phone : AccessibilityService(), Device, Ui {
@@ -213,13 +214,25 @@ class Phone : AccessibilityService(), Device, Ui {
             intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(list[i].second)
             pkg = list[i].second.packageName
         }
+        val before = front()
         try { startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)) } catch (e: Exception) { return Res(false, "cannot open $t") }
+        // Done when the target is in front, or another app came to the front (launchers that hand off, like an assistant
+        // opening inside another app's package). Fails only if nothing new appeared within 8 s.
         val t0 = SystemClock.uptimeMillis()
-        while (pkg != null && pkg != "android" && SystemClock.uptimeMillis() - t0 < 8000 && rootInActiveWindow?.packageName?.toString() != pkg) Thread.sleep(150)
-        return if (pkg == null || pkg == "android" || rootInActiveWindow?.packageName?.toString() == pkg) Res(true, "opened $t") else Res(false, "$t did not open within 8 s")
+        fun shown() = front().let { it == pkg || (it != null && it != before && it != packageName && it != "com.android.systemui") }
+        while (pkg != null && pkg != "android" && SystemClock.uptimeMillis() - t0 < 8000 && !shown()) Thread.sleep(150)
+        val now = front()
+        return when {
+            pkg == null || pkg == "android" || now == pkg -> Res(true, "opened $t")
+            shown() -> Res(true, "opened $t (shown by ${label(now ?: "")})")
+            before == pkg -> Res(true, "$t was already open")
+            else -> Res(false, "$t did not open within 8 s")
+        }
     }
 
     override fun apps() = launcher().filter { it.second.packageName != packageName }.map { it.first }
+    private fun front() = rootInActiveWindow?.packageName?.toString()
+    override fun busy() = SystemClock.uptimeMillis() - lastEvent < 600 || progress(rootInActiveWindow, intArrayOf(300))
     private fun launcher() = apps ?: packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
         .map { it.loadLabel(packageManager).toString() to ComponentName(it.activityInfo.packageName, it.activityInfo.name) }.also { apps = it }
 

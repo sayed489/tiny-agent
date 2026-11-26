@@ -53,6 +53,8 @@ Open **Settings** and paste what your provider gives you:
   | Ollama | `think: false` |
 
   Settings → Test connection shows which switch worked and how long one action took.
+- **Token use and cost:** every task ends with a line such as `12 calls, 4,210 in + 380 out tokens, $0.0006`. Enter your
+  model's price per 1M input and output tokens in Settings to see the cost (gpt-6-luna lists $0.10 in / $0.50 out).
 - Parameters a server rejects (for example `top_k` on Azure) are dropped automatically and not sent again.
 - Small models are the target. Reasoning models also work: when a reply comes back empty because the model spent its
   token budget thinking, TinyAgent raises the budget and asks for low reasoning effort, but each step is slower.

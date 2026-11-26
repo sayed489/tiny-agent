@@ -5,7 +5,7 @@ inclusion: always
 1. app/src/main has exactly 6 Kotlin files: Agent.kt, Llm.kt, Screen.kt, Phone.kt, Main.kt, plus Api.kt
    (package app.tinyagent). Api.kt is the detachable model transport: the only file that talks HTTP to a model server.
    Not counted: Gradle files and wrapper, AndroidManifest.xml, res/xml/agent_service.xml, res/values/strings.xml,
-   .github/workflows/build.yml, src/test/**. Main code is 1,600 lines or fewer in total (raised from 1,200 for the chat UI, settings screen, permission flow, model self-test, URL cleaning, step-ticking checks, speed work and per-provider thinking switches).
+   .github/workflows/build.yml, src/test/**. Main code is 1,700 lines or fewer in total (raised from 1,200 for the chat UI, settings screen, permission flow, model self-test, URL cleaning, step-ticking checks, speed work, per-provider thinking switches and long-task handling).
    Main.kt holds the chat screen (Main), the settings screen (Options) and saved settings (Store).
    Icon and theme resources under res/ are not counted.
 2. Runtime dependencies: Kotlin stdlib and the Android SDK only (HttpURLConnection, org.json, Views built in code).
@@ -16,8 +16,8 @@ inclusion: always
    picks deep links or taps buttons by their text. Every goal goes PLAN -> ACT -> CHECK.
    Allowed string plumbing: parsing the model's reply line, matching an app name to launcher labels,
    detecting a URL (contains "." and no spaces).
-5. Exactly 5 tools, one plain-text command per reply: open, tap, type, scroll, key. The reply `done` is not a tool:
-   it asks the harness to verify the step with CHECK.
+5. Exactly 5 tools, one plain-text command per reply: open, tap, type, scroll, key. The replies `done` and `wait` are not tools:
+   `done` asks the harness to verify the step with CHECK; `wait` lets a loading screen finish, then CHECKs.
 6. Every LLM call: prompt <= 450 tokens (estimated before sending, confirmed with usage.prompt_tokens after).
    Static prefix (rules + tools) <= 150 tokens, placed first, byte-identical across calls of the same type.
    Screen digest <= 200 tokens. When over budget, shrink the digest, never the prefix.

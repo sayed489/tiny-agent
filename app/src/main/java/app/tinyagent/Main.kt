@@ -144,11 +144,12 @@ class Main : Activity() {
                 val st = l.substringBefore("): ").drop(8)
                 msgs.addView(bubble(l.substringAfter("): "), false, when (st) { "done" -> 0xFFDDF5E4.toInt(); "stopped", "answered" -> Color.WHITE; else -> 0xFFFDE7E7.toInt() }))
             }
+            l.startsWith("Usage: ") -> msgs.addView(tv(l.drop(7), 11f, GREY).apply { setPadding(dp(6), 0, 0, dp(6)) })
             l.startsWith("↻ ") -> { replan = l; acts = ArrayList() }
             l.startsWith("Plan ") -> { if (l.startsWith("Plan 1:")) plan = ArrayList(); plan += l.substringAfter(": ").substringBefore(" =>") }
             l.startsWith("✓ ") -> { l.drop(2).takeWhile { it.isDigit() }.toIntOrNull()?.let { done += it }; acts = ArrayList() }
             l.startsWith("→ ") -> acts += "· " + l.drop(2)
-            l.startsWith("· not yet") || l.startsWith("⚠ ") || l.startsWith("Asked") || l.startsWith("API error") || l.startsWith("Volume") -> note(l)
+            l.startsWith("· not yet") || l.startsWith("· waiting") || l.startsWith("⚠ ") || l.startsWith("Asked") || l.startsWith("API error") || l.startsWith("Volume") -> note(l)
         }
         flush()
         if (msgs.childCount == 0) {
@@ -185,6 +186,8 @@ class Options : Activity() {
         field("url", "Base URL (the part before /chat/completions)", "https://your-provider.com/v1"); field("key", "API key (leave empty if your server has none)", "paste key", masked = true)
         field("model", "Model name (exactly as your provider lists it)", "model name")
         toggle("vis", "My model can see images: also use it to read screenshots", false)
+        field("pin", "Price per 1M input tokens, USD (optional, for the cost line)", "0.10")
+        field("pout", "Price per 1M output tokens, USD (optional)", "0.50")
         out = note("")
         col.put(btn("Test connection") { testConnection() }); col.put(out)
         head("Permissions")
@@ -293,7 +296,8 @@ object Store {
         val vision = if (g("vurl").isNotEmpty() && g("vmodel").isNotEmpty()) Endpoint(g("vurl"), g("vkey"), g("vmodel"), g("extra"))
             else if (flag(c, "vis", false)) Endpoint(g("url"), g("key"), g("model"), g("extra")) else null // a vision-language model serves both
         return Config(Endpoint(g("url"), g("key"), g("model"), g("extra")), g("pmodel"), vision, iw, ih,
-            flag(c, "risky", true), flag(c, "every", false), flag(c, "yn", false))
+            flag(c, "risky", true), flag(c, "every", false), flag(c, "yn", false),
+            g("pin").replace(',', '.').trim('$', ' ').toDoubleOrNull() ?: 0.0, g("pout").replace(',', '.').trim('$', ' ').toDoubleOrNull() ?: 0.0)
     }
 
     private fun ksKey(): SecretKey {
