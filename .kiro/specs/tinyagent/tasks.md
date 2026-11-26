@@ -35,5 +35,6 @@ Waves run in order. Tasks inside a wave are independent: each edits only its own
 - [x] 5.7h v0.2.7 thinking off for quick calls (enable_thinking / reasoning_effort, learned per endpoint), installed apps in PLAN, stricter value-matching CHECK, no CHECK-only cascade of ticks, bare-number and run-on reply parsing
 - [x] 5.7i v0.2.8 drop parameters a server rejects (top_k on Azure), thinking-off switches for OpenAI/Azure/Fireworks/Groq/Gemini, DeepSeek/GLM/Kimi, vLLM/SGLang/llama.cpp, DashScope, OpenRouter, Ollama with host hints; Test connection shows speed, switch and dropped params
 - [x] 5.7j v0.2.9 pre-check only after replans, compound open steps don't tick, open succeeds on hand-off apps, wait command + auto-wait on busy screens, gesture retap when a click is ignored, up to 10 steps with budgets that grow, replans told what's done, token + cost line
+- [x] 5.7k v0.3.0 fewer calls: no CHECK after scroll/type, repeats blocked per step and shown, vision only on <3 items or 3 real failures, sequential calls for local servers, capped PLAN facts; cost in ₹
 - [ ] 5.6 Manual on-device test: onboarding, the 3 sample goals, volume-down kill switch, vision fallback (needs a phone)
 - [ ] 5.7 Open a PR (needs a GitHub repository; none was provided)

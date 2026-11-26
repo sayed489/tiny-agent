@@ -69,8 +69,8 @@ class Llm(
     }
 
     override fun plan(goal: String, facts: List<String>, screen: String, apps: List<String>): List<Step> {
-        val f = facts.joinToString("; ").ifEmpty { "none" }
-        val a = appList(apps, 130).ifEmpty { "unknown" } // installed apps, so the planner picks a real app over a website
+        val f = facts.joinToString("; ").take(240).ifEmpty { "none" }
+        val a = appList(apps, 120).ifEmpty { "unknown" } // installed apps, so the planner picks a real app over a website
         val user = fit(Prompts.PLAN, screen) { "Task: $goal\nFacts: $f\nApps: $a\nScreen now:\n$it" }
         var r = send("PLAN", planApi, Prompts.PLAN, user, 0.3, 360) // fast first; a thinking model may think on the retry
         return parsePlan(r).ifEmpty { r = send("PLAN", planApi, Prompts.PLAN, user, 0.5, 360, think = true); parsePlan(r) }.ifEmpty {

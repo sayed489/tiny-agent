@@ -171,7 +171,7 @@ class AgentTest {
         val before = ui.logs.takeWhile { it != "↻ Replanning (1/2)" }.count { it.startsWith("→ ") }
         assertEquals(6, before) // 2 free scrolls, then 4 more count as no progress (was 8 before)
         assertTrue(brain.actLasts.any { it.contains("scrolled 3 times in a row, try another command") })
-        assertTrue(ui.logs.contains("· not yet: Subscribed"))
+        assertEquals(2, brain.checks) // only the "already done?" check after each of the 2 replans; scrolls never trigger CHECK
     }
 
     @Test fun checkAndNextActRunInParallel() {
@@ -253,6 +253,55 @@ class AgentTest {
         assertTrue(ui.logs.contains("· waiting for the screen…"))
     }
 
+    @Test fun repeatsAreShownAndDoNotTriggerVision() {
+        val three = listOf(app(button("Clock", 300), button("Camera", 500), button("Phone", 700), label = "Launcher")) // enough to tap
+        val dev = FakeDevice("home", mapOf("home" to three)).apply { shotResult = byteArrayOf(1) }
+        val ui = FakeUi()
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open the clock", "Alarm", false)))), { _, _ -> "tap 1" })
+        Agent(dev, brain, ui, cfg.copy(vision = Endpoint("http://v", "", "vl"))).run("alarm")
+        assertTrue(ui.logs.any { it.startsWith("⚠ repeated tap \"Clock\": skipped") })
+        // Vision only after 3 real failed actions: each plan has 1 real failure (the unchanged tap) and 3 blocked repeats.
+        assertTrue(dev.shots.isEmpty())
+    }
+
+    @Test fun manyUnlabeledIconsAloneDoNotTriggerVision() {
+        val icons = (0 until 6).map { node(cls = "android.widget.ImageView", l = 40 + it * 150, t = 300, r = 160 + it * 150, b = 420, click = true) }
+        val web = listOf(app(*(icons + button("Open", 900)).toTypedArray(), label = "Chrome"))
+        val dev = FakeDevice("web", mapOf("web" to web))
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("read it", "never", false)))), { _, _ -> "scroll down" })
+        Agent(dev, brain, FakeUi(), cfg.copy(vision = Endpoint("http://v", "", "vl"))).run("x")
+        assertTrue(dev.shots.isEmpty())
+    }
+
+    @Test fun localServerRunsCallsOneByOne() {
+        val dev = weatherDevice()
+        var acts = 0
+        val inner = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com", "Google", false), Step("search weather Tokyo", "Tokyo 18°C", false)))), { s, _ ->
+            when { s.contains("Launcher") -> "open google.com"; s.contains("= \"weather Tokyo\"") -> "key enter"; else -> "type Search weather Tokyo" }
+        })
+        val brain = object : Brain by inner {
+            override fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String) = inner.act(goal, step, k, n, last, tried, screen).also { acts++ }
+        }
+        assertEquals("report: done", Agent(dev, brain, FakeUi(), cfg.copy(parallel = false)).run("weather"))
+        assertEquals(3, acts) // no speculative ACT calls thrown away
+    }
+
+    @Test fun usageLineInRupees() {
+        val ui = FakeUi()
+        val usage = Usage().apply { calls = 86; tokIn = 24370; tokOut = 1062 } // the run from the log
+        Agent(weatherDevice(), FakeBrain(ArrayDeque(listOf(listOf(Step("", "Hi", false)))), { _, _ -> "tap 1" }), ui,
+            cfg.copy(priceIn = 0.10, priceOut = 0.50, rate = 92.0), usage).run("Hello")
+        assertTrue(ui.logs.toString(), ui.logs.contains("Usage: 86 calls, 24370 in + 1062 out tokens, $0.0030 (₹0.27)"))
+    }
+
+    @Test fun planFactsStayShortOnLongTasks() {
+        val api = FakeApi("open X => X is open")
+        val long = (1..12).map { "already done: step number $it with a fairly long description of what happened" }
+        Llm(api).plan("goal", long, "S", (1..80).map { "App number $it" })
+        val prompt = Screen.tokens(api.calls[0].msgs[0].text) + Screen.tokens(api.calls[0].msgs[1].text) + 10
+        assertTrue("PLAN prompt was $prompt tokens", prompt <= 450)
+    }
+
     @Test fun usageLineWithPrice() {
         val ui = FakeUi()
         val usage = Usage().apply { calls = 3; tokIn = 1_000_000; tokOut = 200_000 }
@@ -281,11 +330,12 @@ class AgentTest {
         val dev = FakeDevice("home", mapOf("home" to home))
         val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open the clock", "Alarm", false)))), { _, _ -> "tap 2" })
         val msg = Agent(dev, brain, FakeUi(), cfg).run("set an alarm")
-        assertEquals(listOf("tap Clock", "tapXY 140,840"), dev.actions) // one gesture retap, then the same (screen, command) never runs again
+        // Once per plan (repeats are blocked within a step): a tap plus its gesture retap, then "repeated … skipped".
+        assertEquals(List(3) { listOf("tap Clock", "tapXY 140,840") }.flatten(), dev.actions)
         assertEquals(3, brain.planFacts.size) // first plan + 2 replans, then stop
         assertTrue(brain.planFacts[1].contains("stuck at: open the clock"))
         assertTrue(brain.actLasts.contains("tap \"Clock\" -> screen unchanged"))
-        assertTrue(brain.actLasts.contains("ERR already tried on this screen"))
+        assertTrue(brain.actLasts.any { it.startsWith("ERR tap \"Clock\" was already tried on this screen") })
         assertEquals(2, brain.checks) // only the pre-checks after each replan; unchanged screens never trigger CHECK
         assertTrue(msg, msg.startsWith("report: stuck at step 1"))
     }

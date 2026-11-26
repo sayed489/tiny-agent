@@ -7,6 +7,8 @@ data class Config(
     val main: Endpoint, val planModel: String = "", val vision: Endpoint? = null, val imgW: Int = 352, val imgH: Int = 768,
     val confirmRisky: Boolean = true, val confirmEvery: Boolean = false, val constrainCheck: Boolean = false,
     val priceIn: Double = 0.0, val priceOut: Double = 0.0, // USD per 1M tokens, for the cost line (0 = not shown)
+    val rate: Double = 0.0, // 1 USD in rupees, to show the cost in ₹ too (0 = dollars only)
+    val parallel: Boolean = true, // CHECK and the next ACT at once: faster on cloud APIs; local servers run them one by one
 )
 
 /** Last 200 log lines, shared between the service (writer) and the activity (reader). */
@@ -72,8 +74,9 @@ class Agent(
             status = "stopped"; msg = "Stopped"
         }
         ui.log("Result ($status): $msg"); ui.status(msg)
-        ui.log("Usage: ${usage.calls} calls, ${usage.tokIn} in + ${usage.tokOut} out tokens" +
-            if (cfg.priceIn + cfg.priceOut > 0) ", $" + "%.4f".format((usage.tokIn * cfg.priceIn + usage.tokOut * cfg.priceOut) / 1e6) else "")
+        val usd = (usage.tokIn * cfg.priceIn + usage.tokOut * cfg.priceOut) / 1e6
+        ui.log("Usage: ${usage.calls} calls, ${usage.tokIn} in + ${usage.tokOut} out tokens" + (if (cfg.priceIn + cfg.priceOut <= 0) "" else
+            ", $" + "%.4f".format(usd) + if (cfg.rate > 0) " (₹" + "%.2f".format(usd * cfg.rate) + ")" else ""))
         val secs = "${(now() - t0) / 1000}"
         csv(listOf(goal, cfg.main.model, "$actions", "${usage.calls}", "${usage.maxPrompt}", "${usage.vision}", "$replans", secs, status)
             .joinToString(",") { if (it.contains(',') || it.contains('"')) "\"" + it.replace("\"", "\"\"") + "\"" else it })
@@ -82,7 +85,8 @@ class Agent(
 
     /** A replan never ends the task with a direct answer, and is told which steps are done so it plans only the rest. */
     private fun newPlan(goal: String, first: Boolean): List<Step> {
-        val f = facts.toList() + if (done.isEmpty()) emptyList() else listOf("already done: " + done.joinToString(", ") { it.take(40) } + "; plan only the rest")
+        // Kept short (last 4 done steps, 30 chars each) so a long task can't push PLAN over its token budget.
+        val f = facts.toList() + if (done.isEmpty()) emptyList() else listOf("already done: " + done.takeLast(4).joinToString(", ") { it.take(30) } + "; plan only the rest")
         return call { brain.plan(goal, f, Screen.digest(dev.windows(), Mode.READ, 120, w, h).text, dev.apps()) }.filter { first || it.doing.isNotEmpty() }
     }
     private val done = ArrayList<String>()
@@ -97,17 +101,21 @@ class Agent(
     /** Runs one step. true = step done, false = replan needed. [pre]: first check whether it is already done (while ACT runs). */
     private fun step(goal: String, st: Step, k: Int, n: Int, pre: Boolean): Boolean {
         var wins = dev.windows(); var d = act(wins)
-        var noProg = 0; var acts = 0; var last = "none"; var scrolls = 0; var waits = 0; var next: String? = null
+        var noProg = 0; var acts = 0; var last = "none"; var scrolls = 0; var waits = 0; var fails = 0; var next: String? = null
+        ran.clear() // repeats are blocked within a step only: a later step may need the same tap on a revisited screen
         val tried = ArrayDeque<String>(); val seen = hashSetOf(d.hash)
         if (pre) {
             val d0 = d
-            val (ok, r) = checkAndAct(st, Screen.digest(wins, Mode.READ, 200, w, h).text) { brain.act(goal, st, k, n, "none", emptyList(), d0.text) }
+            val (ok, r) = checkAndAct(st, Screen.digest(wins, Mode.READ, 200, w, h).text,
+                if (cfg.parallel) ({ brain.act(goal, st, k, n, "none", emptyList(), d0.text) }) else null)
             if (ok) { tickedOn = d.hash; return true } else next = r }
         if (((st.risky && cfg.confirmRisky) || cfg.confirmEvery) && !ui.ask("About to: ${st.doing}")) throw Halt("stopped", "You declined: ${st.doing}")
         while (true) {
             budget()
             if (noProg >= 4 || acts >= STEP_ACTIONS) { fact("stuck at: ${st.doing}"); return false }
-            val useV = vision && (d.actionable < 3 || d.unlabeled * 2 > d.actionable || noProg >= 3)
+            // Vision only when the screen has almost nothing to tap, or 3 real actions failed. (Many unlabeled icons alone, as on
+            // most web pages, no longer switches it on: it is slower and small models do worse with it.)
+            val useV = vision && (d.actionable < 3 || fails >= 3)
             val pick = if (useV) look(st, wins) else null
             val cmd = pick?.cmd ?: run {
                 val reply = next ?: call { brain.act(goal, st, k, n, last, tried.toList(), d.text) }
@@ -139,7 +147,10 @@ class Agent(
                 dev.settle(); wins = dev.windows(); d = act(wins); last = "user typed the password"; continue
             }
             val label = label(cmd, d, pick)
-            if (!ran.add("${d.hash}|$label")) { last = "ERR already tried on this screen"; noProg++; continue }
+            if (!ran.add("${d.hash}|$label")) {
+                ui.log("⚠ repeated $label: skipped"); last = "ERR $label was already tried on this screen and did not help. Pick a different id."
+                noProg++; continue
+            }
             val res = exec(cmd, d, pick)
             actions++; acts++
             ui.log("→ $label: ${res.msg}")
@@ -154,19 +165,22 @@ class Agent(
             }
             ui.log("  time: wait ${t2 - t1} ms, read ${now() - t2} ms") // debug log only; the chat ignores it
             when {
-                !res.ok -> { last = "$label failed: ${res.msg}"; noProg++ }
-                d2.hash == d.hash -> { last = "$label -> screen unchanged"; noProg++ }
-                d2.hash in seen -> { last = "$label -> back to an earlier screen"; noProg++ }
+                !res.ok -> { last = "$label failed: ${res.msg}"; noProg++; fails++ }
+                d2.hash == d.hash -> { last = "$label -> screen unchanged"; noProg++; fails++ }
+                d2.hash in seen -> { last = "$label -> back to an earlier screen"; noProg++; fails++ }
                 else -> {
                     last = "$label -> screen changed"; seen += d2.hash
                     if (cmd is Cmd.Scroll && ++scrolls > 2) { last = "$label -> screen changed; scrolled $scrolls times in a row, try another command"; noProg++ }
                     lastDone = "$label -> ${res.msg}"
-                    val l2 = last; val t2s = (tried + label).takeLast(3) // what the next ACT would be asked anyway
-                    val nextV = vision && (d2.actionable < 3 || d2.unlabeled * 2 > d2.actionable || noProg >= 3)
-                    val (ok, r) = checkAndAct(st, Screen.digest(wins2, Mode.READ, 200, w, h).text,
-                        if (nextV) null else ({ brain.act(goal, st, k, n, l2, t2s, d2.text) }))
-                    if (ok) { tickedOn = d2.hash; return true }
-                    next = r; ui.log("· not yet: ${st.doneWhen}")
+                    // Scrolling and typing rarely finish a step: skip CHECK there (the model can still say "done"). Saves calls.
+                    if (cmd !is Cmd.Scroll && cmd !is Cmd.Type) {
+                        val l2 = last; val t2s = (tried + label).takeLast(3) // what the next ACT would be asked anyway
+                        val nextV = vision && (d2.actionable < 3 || fails >= 3)
+                        val (ok, r) = checkAndAct(st, Screen.digest(wins2, Mode.READ, 200, w, h).text,
+                            if (nextV || !cfg.parallel) null else ({ brain.act(goal, st, k, n, l2, t2s, d2.text) }))
+                        if (ok) { tickedOn = d2.hash; return true }
+                        next = r; ui.log("· not yet: ${st.doneWhen}")
+                    }
                 }
             }
             if (cmd !is Cmd.Scroll) scrolls = 0

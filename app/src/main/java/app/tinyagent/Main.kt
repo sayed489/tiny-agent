@@ -188,6 +188,7 @@ class Options : Activity() {
         toggle("vis", "My model can see images: also use it to read screenshots", false)
         field("pin", "Price per 1M input tokens, USD (optional, for the cost line)", "0.10")
         field("pout", "Price per 1M output tokens, USD (optional)", "0.50")
+        field("rate", "1 USD in ₹, to show the cost in rupees", "92", def = "92")
         out = note("")
         col.put(btn("Test connection") { testConnection() }); col.put(out)
         head("Permissions")
@@ -297,7 +298,14 @@ object Store {
             else if (flag(c, "vis", false)) Endpoint(g("url"), g("key"), g("model"), g("extra")) else null // a vision-language model serves both
         return Config(Endpoint(g("url"), g("key"), g("model"), g("extra")), g("pmodel"), vision, iw, ih,
             flag(c, "risky", true), flag(c, "every", false), flag(c, "yn", false),
-            g("pin").replace(',', '.').trim('$', ' ').toDoubleOrNull() ?: 0.0, g("pout").replace(',', '.').trim('$', ' ').toDoubleOrNull() ?: 0.0)
+            num(g("pin")), num(g("pout")), num(g("rate").ifEmpty { "92" }), parallel = !local(cleanBaseUrl(g("url"))))
+    }
+    private fun num(s: String) = s.replace(',', '.').trim('$', '₹', ' ').toDoubleOrNull() ?: 0.0
+    /** A server on this phone or your network: it usually runs one request at a time, so parallel calls only slow it down. */
+    fun local(url: String): Boolean {
+        val h = runCatching { java.net.URL(url).host.lowercase() }.getOrDefault("")
+        return h == "localhost" || h.startsWith("127.") || h.startsWith("10.") || h.startsWith("192.168.") || h.endsWith(".local") ||
+            (h.startsWith("172.") && h.split('.').getOrNull(1)?.toIntOrNull() in 16..31)
     }
 
     private fun ksKey(): SecretKey {
