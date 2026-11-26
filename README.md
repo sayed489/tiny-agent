@@ -25,23 +25,26 @@ blocked. As a result it **will not run with Android 16 Advanced Protection turne
 
 ## Configure a model
 
-Any OpenAI-compatible `/chat/completions` endpoint works, cloud or self-hosted:
+Any OpenAI-compatible `/chat/completions` endpoint works, cloud or self-hosted. Open **Settings**, choose a shortcut
+(or "Any OpenAI-compatible provider") and fill in:
 
-| Server | Base URL |
+| Field | What to enter |
 |---|---|
-| OpenAI / OpenRouter / Groq / any hosted provider | the provider's `https://…/v1` URL |
-| vLLM | `http://<pc-ip>:8000/v1` |
-| llama.cpp `llama-server` | `http://<pc-ip>:8080/v1` |
-| Ollama | `http://<pc-ip>:11434/v1` |
-| LM Studio | `http://<pc-ip>:1234/v1` |
+| Base URL | The part before `/chat/completions`, for example `https://your-provider.com/v1` or `http://<pc-ip>:8000/v1`. A URL without `/v1` is retried with `/v1` automatically. |
+| API key | Your provider's key. Leave it empty for servers without one. Keys are encrypted with an Android Keystore AES-GCM key. |
+| Model | The model name exactly as your provider lists it. |
 
-- The API key can be blank for local servers. Keys are encrypted with an Android Keystore AES-GCM key.
+- **Test connection** runs one real PLAN call and one real ACT call on a sample screen and shows what the model wrote
+  and what TinyAgent understood. Use it first whenever you change models.
+- **Vision-language models** (for example Liquid LFM2-VL): turn on "My model can see images". The same endpoint then
+  also reads screenshots when the screen has few labelled items. Set the screenshot size under Advanced
+  (LFM2-VL `320x704`, Qwen `352x768`).
 - Plain `http://` is allowed so LAN servers work. Use `https://` for anything outside your own network.
-- **Turn thinking off** for Qwen3-style models, or the tiny `max_tokens` budgets get spent on `<think>`. On vLLM and
-  llama.cpp, set Extra body to `{"chat_template_kwargs":{"enable_thinking":false}}`.
-- Plan model (optional): a stronger model used only for PLAN.
-- Vision (optional): a VL model that is used only when the screen has almost no labelled items or the step stalls.
-  Use image size `352x768` for Qwen3.5 (about 264 image tokens) or `320x704` for LFM2.5-VL.
+- Small models are the target. Reasoning models also work: when a reply comes back empty because the model spent its
+  token budget thinking, TinyAgent raises the budget and asks for low reasoning effort, but each step is slower.
+- Extra body (Advanced) is merged into every request. For Qwen3-style models on vLLM or llama.cpp, set
+  `{"chat_template_kwargs":{"enable_thinking":false}}`.
+- Plan model (Advanced): a stronger model used only for PLAN.
 - "Constrain CHECK to Y/N" adds vLLM's `structured_outputs: {"choice": ["Y","N"]}`.
 
 ## Detaching or replacing the model API

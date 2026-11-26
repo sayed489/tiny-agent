@@ -169,6 +169,21 @@ class ApiTest {
         assertTrue(!api.thinks); assertEquals(1, hits.size)
     }
 
+    @Test fun baseUrlWithoutV1FallsBackToV1() {
+        responses.addAll(listOf(404 to "not found", 200 to ok("OK"), 200 to ok("again")))
+        val api = OpenAiCompat(Endpoint("http://127.0.0.1:${server.localPort}", "", "m"), longArrayOf(1, 1))
+        assertEquals("OK", api.chat(listOf(Msg("user", "u")), 0.1, 8).text)
+        assertEquals(listOf("/chat/completions", "/v1/chat/completions"), hits.map { it.path })
+        api.chat(listOf(Msg("user", "u")), 0.1, 8)
+        assertEquals("/v1/chat/completions", hits.last().path) // remembered
+    }
+
+    @Test fun missingPathGivesAHelpfulMessage() {
+        responses.add(404 to "not found")
+        try { OpenAiCompat(Endpoint(base, "", "m"), longArrayOf(1, 1)).chat(listOf(Msg("user", "u")), 0.1, 8); fail() }
+        catch (e: ApiError) { assertTrue(e.message!!.contains("Base URL")) }
+    }
+
     @Test fun nullContentAndMissingUsage() {
         responses.add(200 to JSONObject().put("choices", listOf(mapOf("message" to mapOf("content" to JSONObject.NULL)))).toString())
         val r = OpenAiCompat(Endpoint(base, "k", "m")).chat(listOf(Msg("user", "u")), 0.1, 24)

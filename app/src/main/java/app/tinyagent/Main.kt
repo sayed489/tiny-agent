@@ -162,10 +162,10 @@ class Main : Activity() {
 
 /** Settings screen: model + API key first, then permissions, behaviour, advanced options and tools. */
 class Options : Activity() {
-    private val presets = listOf(
-        Triple("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"), Triple("OpenRouter", "https://openrouter.ai/api/v1", ""),
-        Triple("Groq", "https://api.groq.com/openai/v1", "llama-3.1-8b-instant"),
-        Triple("My own server (Ollama, llama.cpp, vLLM, LM Studio)", "http://192.168.1.10:11434/v1", ""), Triple("Custom", "", ""))
+    /** Shortcuts that only fill in the Base URL. Any other OpenAI-compatible endpoint works with "Any provider". */
+    private val presets = listOf("Any OpenAI-compatible provider" to "", "OpenAI" to "https://api.openai.com/v1", "OpenRouter" to "https://openrouter.ai/api/v1",
+        "Groq" to "https://api.groq.com/openai/v1", "Together AI" to "https://api.together.xyz/v1", "Ollama (your PC)" to "http://192.168.1.10:11434/v1",
+        "LM Studio (your PC)" to "http://192.168.1.10:1234/v1", "llama.cpp server (your PC)" to "http://192.168.1.10:8080/v1", "vLLM (your server)" to "http://192.168.1.10:8000/v1")
     private val f = LinkedHashMap<String, EditText>(); private val sw = LinkedHashMap<String, Switch>()
     private lateinit var col: LinearLayout; private lateinit var adv: LinearLayout
     private lateinit var a11y: TextView; private lateinit var bat: TextView; private lateinit var out: TextView
@@ -177,21 +177,22 @@ class Options : Activity() {
             gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), dp(8), dp(8), dp(8)); setBackgroundColor(Color.WHITE)
             addView(btn("‹ Back", Color.TRANSPARENT, ACCENT) { finish() }); addView(tv("Settings", 18f, bold = true))
         }
-        head("AI model"); note("Works with any OpenAI-compatible API. Fast chat models work best, for example gpt-4o-mini or llama-3.1-8b-instant. Reasoning models (gpt-5, o-series) work too, but each step is slower.")
+        head("AI model"); note("Works with any OpenAI-compatible chat API, cloud or your own server, including tiny models such as Liquid LFM2-VL. Pick a shortcut or type your own Base URL.")
         val sp = Spinner(this).apply { adapter = ArrayAdapter(this@Options, android.R.layout.simple_spinner_dropdown_item, presets.map { it.first }) }
-        var last = presets.indexOfFirst { it.second == Store.get(this, "url") }.let { if (it < 0) presets.lastIndex else it }
+        var last = presets.indexOfFirst { it.second == Store.get(this, "url") }.coerceAtLeast(0)
         sp.setSelection(last)
         sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, i: Int, id: Long) {
                 if (i == last) return else last = i
                 presets[i].second.takeIf { it.isNotEmpty() }?.let { f.getValue("url").setText(it) }
-                presets[i].third.takeIf { it.isNotEmpty() }?.let { f.getValue("model").setText(it) }
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
         col.put(sp)
-        field("url", "Base URL", "https://api.openai.com/v1"); field("key", "API key (leave empty for your own server)", "sk-…", masked = true)
-        field("model", "Model", "gpt-4o-mini")
+        field("url", "Base URL (the part before /chat/completions)", "https://your-provider.com/v1"); field("key", "API key (leave empty if your server has none)", "paste key", masked = true)
+        field("model", "Model name (exactly as your provider lists it)", "model name")
+        toggle("vis", "My model can see images: also use it to read screenshots", false)
+        note("Image size for screenshots is under Advanced (LFM2-VL: 320x704).")
         out = note("")
         col.put(btn("Test connection") { testConnection() }); col.put(out)
         head("Permissions")
@@ -201,10 +202,10 @@ class Options : Activity() {
         toggle("risky", "Ask before sending, buying, posting or deleting", true); toggle("every", "Ask before every step", false)
         col.put(btn("Advanced ▾", Color.WHITE, ACCENT) { adv.visibility = if (adv.visibility == View.GONE) View.VISIBLE else View.GONE }.apply { background = shape(Color.WHITE, 22, LINE) })
         col.addView(adv)
-        head("Advanced", adv); note("For your own servers. Qwen3 models: set Extra body to {\"chat_template_kwargs\":{\"enable_thinking\":false}}.", adv)
+        head("Advanced", adv); note("Extra body is merged into every request, for example {\"chat_template_kwargs\":{\"enable_thinking\":false}} for Qwen3 on vLLM or llama.cpp.", adv)
         field("pmodel", "Plan model (optional, defaults to Model)", "", into = adv); field("extra", "Extra request body (JSON)", "{}", into = adv)
-        field("vurl", "Vision base URL (optional)", "", into = adv); field("vkey", "Vision API key", "", masked = true, into = adv)
-        field("vmodel", "Vision model", "", into = adv); field("img", "Vision image size", "352x768", def = "352x768", into = adv)
+        field("vurl", "Separate vision Base URL (optional)", "", into = adv); field("vkey", "Vision API key", "", masked = true, into = adv)
+        field("vmodel", "Vision model", "", into = adv); field("img", "Screenshot size WxH (Qwen 352x768, LFM2-VL 320x704)", "352x768", def = "352x768", into = adv)
         toggle("yn", "Constrain CHECK to Y/N (vLLM only)", false, adv)
         head("Tools")
         col.put(btn("Copy debug log", Color.WHITE, ACCENT) {
@@ -222,16 +223,21 @@ class Options : Activity() {
 
     override fun onPause() { super.onPause(); f.forEach { (k, e) -> Store.put(this, k, e.text.toString().trim()) }; sw.forEach { (k, s) -> Store.setFlag(this, k, s.isChecked) } }
 
+    /** Runs one real PLAN call and one real ACT call on a sample screen and shows what the model wrote and what TinyAgent understood. */
     private fun testConnection() {
         val v = { k: String -> f.getValue(k).text.toString().trim() }
         out.text = "Testing…"
         Thread {
             val r = try {
                 val api = ChatApi.create(Endpoint(v("url"), v("key"), v("model"), v("extra")))
-                val a = api.chat(listOf(Msg("user", "Reply with the word OK")), 0.1, 8)
-                val slow = (api as? OpenAiCompat)?.thinks == true
-                "✓ Connected in ${a.ms} ms. The model said: " + a.text.substringAfterLast("</think>").trim().take(40).ifEmpty { "(nothing)" } +
-                    if (slow) "\nThis is a reasoning model: it works, but every step is slower. A non-reasoning model (for example gpt-4o-mini) is much faster." else ""
+                val scr = "App: Launcher | popup: no | keyboard: no\n1 button YouTube\n2 button Chrome\n3 button Camera"
+                val p = api.chat(listOf(Msg("system", Prompts.PLAN), Msg("user", "Task: open YouTube and search for cats\nFacts: none\nScreen now:\n$scr")), 0.3, 150)
+                val a = api.chat(listOf(Msg("system", Prompts.ACT), Msg("user", "Goal: open YouTube\nStep 1 of 1: open YouTube (done when: YouTube is open)\nLast: none\nTried: none\nScreen:\n$scr")), 0.1, 24)
+                val steps = parsePlan(p.text); val cmd = parse(a.text, emptyList(), 3)
+                fun raw(t: String) = "“" + t.substringAfterLast("</think>").trim().replace('\n', ' ').take(90) + "”"
+                "✓ Connected (${p.ms + a.ms} ms)\nPlan: " + (if (steps.isEmpty()) "✗ could not read ${raw(p.text)}" else steps.joinToString(" › ") { it.doing.ifEmpty { "answer" } }) +
+                    "\nAction: " + (cmd.first?.let { "✓ $it" } ?: "✗ could not read ${raw(a.text)} (${cmd.second})") +
+                    if ((api as? OpenAiCompat)?.thinks == true) "\nThis is a reasoning model: it works, but each step is slower." else ""
             } catch (e: Exception) { "✗ ${e.message}" }
             runOnUiThread { out.text = r }
         }.start()
@@ -282,7 +288,8 @@ object Store {
         val g = { k: String -> get(c, k).trim() }
         val sz = g("img").split('x', 'X', '*').mapNotNull { it.trim().toIntOrNull() }
         val (iw, ih) = if (sz.size == 2 && sz.all { it in 64..2048 }) sz[0] to sz[1] else 352 to 768
-        val vision = if (g("vurl").isNotEmpty() && g("vmodel").isNotEmpty()) Endpoint(g("vurl"), g("vkey"), g("vmodel"), g("extra")) else null
+        val vision = if (g("vurl").isNotEmpty() && g("vmodel").isNotEmpty()) Endpoint(g("vurl"), g("vkey"), g("vmodel"), g("extra"))
+            else if (flag(c, "vis", false)) Endpoint(g("url"), g("key"), g("model"), g("extra")) else null // a vision-language model serves both
         return Config(Endpoint(g("url"), g("key"), g("model"), g("extra")), g("pmodel"), vision, iw, ih,
             flag(c, "risky", true), flag(c, "every", false), flag(c, "yn", false))
     }

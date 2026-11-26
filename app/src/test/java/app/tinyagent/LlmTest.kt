@@ -137,6 +137,27 @@ class LlmTest {
         bad("tap on it")
     }
 
+    @Test fun tinyModelPhrasing() {
+        ok("I will tap 3", Cmd.Tap(3))
+        ok("tap(2)", Cmd.Tap(2))
+        ok("tap id 2", Cmd.Tap(2))
+        ok("Tap number 3.", Cmd.Tap(3))
+        ok("Please open YouTube", Cmd.Open("YouTube"))
+        ok("**tap 2**", Cmd.Tap(2))
+        ok("Step 1: scroll down", Cmd.Scroll("down"))
+        ok("Action: key(back)", Cmd.Key("back"))
+        assertTrue(bad("Sure, here is how I would do that: tap 3").contains("unknown")) // verb too far into the sentence
+    }
+
+    @Test fun tinyModelPlans() {
+        assertEquals(listOf("Open YouTube", "Search for cats"), parsePlan("Step 1: Open YouTube\nStep 2: Search for cats").map { it.doing })
+        assertEquals(listOf("Open YouTube", "Search for cats"), parsePlan("Here is the plan:\nOpen YouTube.\nSearch for cats.").map { it.doing.trimEnd('.') })
+        assertEquals(listOf("Open YouTube", "Search cats"), parsePlan("1. **Open YouTube** => YouTube is open\n2. **Search cats** => results").map { it.doing })
+        assertEquals(listOf(Step("", "Hello! How can I help?", false)), parsePlan("Hello! How can I help?"))
+        assertTrue(parsePlan("Sure, I can help with that.").isEmpty())
+        assertTrue(parsePlan("I am sorry.\nWhat app do you mean?").isEmpty())
+    }
+
     @Test fun planPrefixStillWithinBudget() { assertTrue(Screen.tokens(Prompts.PLAN) <= 150) }
 
     @Test fun planRetriesThenFallsBack() {

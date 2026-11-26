@@ -37,7 +37,8 @@ interface ChatApi {
 
 /** OpenAI-compatible POST {baseUrl}/chat/completions. Keep-alive is reused across calls for speed. */
 class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = longArrayOf(1000, 3000)) : ChatApi {
-    private val url = ep.baseUrl.trim().trimEnd('/').let { if (it.endsWith("/chat/completions")) it else "$it/chat/completions" }
+    private val base = ep.baseUrl.trim().trimEnd('/').removeSuffix("/chat/completions")
+    private var url = "$base/chat/completions"; private var triedV1 = false
     private val extraBody: JSONObject? = ep.extraBody.trim().takeIf { it.isNotEmpty() }?.let { JSONObject(it) }
 
     /**
@@ -67,6 +68,9 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
                 if (!cutOff || adapts++ >= 3) return r
                 if (q.thinks) q.budget = minOf(q.budget * 2, 8192) else q.thinks = true // empty and cut off: think less, allow more
             } catch (e: ApiError) {
+                if (e.code == 404 && !triedV1 && runCatching { URL(base).path.isEmpty() }.getOrDefault(false)) { // "http://host:8000" without /v1
+                    triedV1 = true; url = "$base/v1/chat/completions"; continue
+                }
                 if (e.code == 400 && adapts++ < 4 && adapt(e.message.orEmpty())) continue
                 if (!e.retryable || attempt >= waits.size) throw e
                 Thread.sleep(waits[attempt++])
@@ -95,7 +99,7 @@ class OpenAiCompat(private val ep: Endpoint, private val waits: LongArray = long
             c.outputStream.use { it.write(bytes) }
             val code = c.responseCode
             val text = (if (code < 400) c.inputStream else c.errorStream)?.use { it.readBytes().decodeToString() } ?: ""
-            if (code >= 400) throw ApiError("HTTP $code ${errText(text)}", code == 429 || code >= 500, code)
+            if (code >= 400) throw ApiError("HTTP $code ${errText(text)}" + if (code == 404) " (check the Base URL: most servers end with /v1)" else "", code == 429 || code >= 500, code)
             val j = JSONObject(text)
             val ch = j.getJSONArray("choices").getJSONObject(0)
             val m = ch.optJSONObject("message")

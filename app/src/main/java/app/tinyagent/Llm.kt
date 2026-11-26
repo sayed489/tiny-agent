@@ -136,19 +136,23 @@ fun cleanLine(line: String): String {
     while (i < s.length && s[i].isDigit()) i++
     if (i > 0 && i < s.length && (s[i] == '.' || s[i] == ')') && (i + 1 == s.length || s[i + 1] == ' ')) s = s.substring(i + 1).trim()
     for (p in listOf("action:", "command:")) if (s.lowercase().startsWith(p)) s = s.substring(p.length).trim()
-    return s.trim('"', '\'', '“', '”', ' ')
+    if (s.lowercase().startsWith("step ")) s.substring(5).trimStart().let { t -> t.takeWhile { it.isDigit() }.let { d ->
+        if (d.isNotEmpty() && t.length > d.length && t[d.length] in ":.)") s = t.substring(d.length + 1).trim() } }
+    return s.replace("**", "").trim('"', '\'', '“', '”', ' ')
 }
 
 private fun unq(s: String) = s.trim().trim('"', '\'', '“', '”', '`').trim()
-private fun word(s: String) = unq(s).trimEnd('.', '!', ',', ';').lowercase()
+private fun word(s: String) = unq(s).trim('(', ')', '[', ']').trimEnd('.', '!', ',', ';').lowercase()
 fun parse(reply: String, items: List<Item>, maxMark: Int = 0): Pair<Cmd?, String?> {
     val line = cleanLine(firstLine(reply))
     if (line.isEmpty()) return null to "empty reply"
-    val sp = line.indexOf(' ')
-    val v0 = (if (sp < 0) line else line.substring(0, sp)).lowercase().trimEnd(':')
-    val verb = ALIAS[v0] ?: v0
-    val rest = if (sp < 0) "" else line.substring(sp + 1).trim()
-    if (verb !in VERBS) return null to "unknown command $v0"
+    // Tiny models write "I will tap 3" or "tap(3)": take the verb from the first 3 words, the rest is its argument.
+    val toks = line.split(' ').filter { it.isNotEmpty() }
+    fun verbOf(t: String) = t.takeWhile { it.isLetter() }.lowercase().let { ALIAS[it] ?: it }
+    val vi = toks.take(3).indexOfFirst { verbOf(it) in VERBS }
+    if (vi < 0) return null to "unknown command ${verbOf(toks[0])}"
+    val verb = verbOf(toks[vi])
+    val rest = (toks[vi].dropWhile { it.isLetter() } + " " + toks.drop(vi + 1).joinToString(" ")).trim(':', ' ')
     fun idOf(tok: String): Int? = tok.trim('[', ']', '(', ')', '#', '.', ',').toIntOrNull()
     fun valid(id: Int) = if (maxMark > 0) id in 1..maxMark else items.any { it.id == id }
     /** Exact unique label; with [loose], also "tap on the X button" (longest label inside) or "tap Voice" (unique prefix). */
@@ -165,7 +169,8 @@ fun parse(reply: String, items: List<Item>, maxMark: Int = 0): Pair<Cmd?, String
         "open" -> unq(rest).trimEnd('.').let { if (it.isEmpty()) null to "open needs an app or website" else Cmd.Open(it) to null }
         "scroll" -> word(rest).let { if (it in DIRS) Cmd.Scroll(it) to null else null to "scroll needs down, up, left or right" }
         "key" -> word(rest).let { if (it in KEYS) Cmd.Key(it) to null else null to "key needs back, home, enter or notifications" }
-        "tap" -> when (val id = idOf(rest.substringBefore(' ')) ?: (if (maxMark == 0) byLabel(rest, items, loose = true) else null)) {
+        "tap" -> when (val id = rest.split(' ').filter { it.isNotEmpty() }.let { t -> (if (t.firstOrNull()?.lowercase() in setOf("id", "number", "no", "item")) t.getOrNull(1) else t.firstOrNull())?.let(::idOf) }
+            ?: (if (maxMark == 0) byLabel(rest, items, loose = true) else null)) {
             null -> null to "tap needs an id from Screen"
             else -> if (valid(id)) Cmd.Tap(id) to null else null to "no id $id on Screen"
         }
@@ -205,5 +210,10 @@ fun parsePlan(reply: String): List<Step> {
     if (arrowed.isNotEmpty()) return arrowed.take(6)
     raw.map(::cleanLine).firstOrNull { it.startsWith("answer:", ignoreCase = true) }
         ?.let { a -> return listOf(Step("", a.substringAfter(':').trim().ifEmpty { "OK" }, false)) }
-    return raw.filter { it[0].isDigit() || it[0] in "-*•" }.mapNotNull { step(cleanLine(it), null) }.take(6)
+    val listed = raw.filter { it[0].isDigit() || it[0] in "-*•" || it.startsWith("step ", ignoreCase = true) }
+    if (listed.isNotEmpty()) return listed.mapNotNull { step(cleanLine(it), null) }.take(6)
+    val plain = raw.map(::cleanLine).filter { !it.endsWith(":") }
+    // No markers: one short line ending in ? or ! is a chat reply; two or more short lines are steps; anything else is unreadable.
+    if (plain.size == 1 && plain[0].contains(' ') && (plain[0].endsWith("?") || plain[0].endsWith("!"))) return listOf(Step("", plain[0], false))
+    return if (plain.size >= 2 && plain.all { it.length <= 80 && !it.endsWith("?") }) plain.mapNotNull { step(it, null) }.take(6) else emptyList()
 }
