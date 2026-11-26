@@ -10,12 +10,14 @@ sealed class Cmd {
     data class Type(val id: Int?, val text: String) : Cmd()
     data class Scroll(val dir: String) : Cmd()
     data class Key(val k: String) : Cmd()
+    /** Not a phone tool: the model says the current step is finished. The harness verifies it with CHECK before ticking. */
+    object Done : Cmd() { override fun toString() = "Done" }
 }
 
 interface Brain {
     fun plan(goal: String, facts: List<String>, screen: String): List<Step>
     fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String): String
-    fun check(doneWhen: String, screen: String, last: String = "none"): Boolean
+    fun check(doneWhen: String, screen: String, last: String = "none", doing: String = ""): Boolean
     fun report(goal: String, status: String, screen: String): String
     fun look(step: Step, jpeg: ByteArray): String
 }
@@ -41,8 +43,10 @@ object Prompts {
         "type <id> <text>\n" +
         "scroll down|up|left|right\n" +
         "key back|home|enter|notifications\n" +
-        "Use ids from Screen. Do only the current step. If a popup is in the way, close it or answer it safely. Never repeat a command in Tried."
-    const val CHECK = "Answer with one letter: Y or N."
+        "done (the current step is already finished)\n" +
+        "Use ids from Screen. Do only the current step. To type, there must be an input; if not, tap a search or text box first. " +
+        "If a popup is in the way, close it or answer it safely. Never repeat a command in Tried."
+    const val CHECK = "Is the step done? Answer Y or N. Say Y when the screen shows the step's result, even if small details differ."
     const val REPORT = "Tell the user the result of their phone task in one short sentence, using only what the screen shows. If it failed, say what is missing."
     const val LOOK = "This is a phone screenshot with numbered boxes. Reply with ONE command: tap <number>, scroll down, or key back."
 }
@@ -63,8 +67,8 @@ class Llm(
     override fun plan(goal: String, facts: List<String>, screen: String): List<Step> {
         val f = facts.joinToString("; ").ifEmpty { "none" }
         val user = fit(Prompts.PLAN, screen) { "Task: $goal\nFacts: $f\nScreen now:\n$it" }
-        var r = send("PLAN", planApi, Prompts.PLAN, user, 0.3, 150)
-        return parsePlan(r).ifEmpty { r = send("PLAN", planApi, Prompts.PLAN, user, 0.5, 150); parsePlan(r) }.ifEmpty {
+        var r = send("PLAN", planApi, Prompts.PLAN, user, 0.3, 240)
+        return parsePlan(r).ifEmpty { r = send("PLAN", planApi, Prompts.PLAN, user, 0.5, 240); parsePlan(r) }.ifEmpty {
             log("⚠ Could not read the model's plan " + if (r.isBlank()) "(empty reply)" else "“${r.replace('\n', ' ').take(80)}”")
             listOf(Step(goal, "the goal is done", false))
         }
@@ -73,24 +77,26 @@ class Llm(
     override fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String): String {
         val t = tried.joinToString(", ").ifEmpty { "none" }
         val user = fit(Prompts.ACT, screen) { "Goal: $goal\nStep $k of $n: ${step.doing} (done when: ${step.doneWhen})\nLast: $last\nTried: $t\nScreen:\n$it" }
-        return send("ACT", api, Prompts.ACT, user, 0.1, 24)
+        return send("ACT", api, Prompts.ACT, user, 0.1, 48)
     }
 
-    /** [last] is the action that led to this screen and its result, e.g. "open YouTube -> opened YouTube". */
-    override fun check(doneWhen: String, screen: String, last: String): Boolean {
-        val user = fit(Prompts.CHECK, screen) { "Last action: $last\nScreen:\n$it\nDoes the screen show this: $doneWhen?" }
+    /** Asks about the whole step (what it does + its result), not only the literal done-when text, plus the last action as evidence. */
+    override fun check(doneWhen: String, screen: String, last: String, doing: String): Boolean {
+        val user = fit(Prompts.CHECK, screen) {
+            (if (doing.isEmpty()) "" else "Step: $doing\n") + "Done when: $doneWhen\nLast action: $last\nScreen:\n$it\nIs this step done?"
+        }
         val extra: Map<String, Any?> = if (yesNo) mapOf("structured_outputs" to mapOf("choice" to listOf("Y", "N"))) else emptyMap()
-        return yes(send("CHECK", api, Prompts.CHECK, user, 0.1, 8, extra)) // 8 tokens: room for "Answer: Y" or "**Yes**"
+        return yes(send("CHECK", api, Prompts.CHECK, user, 0.1, 16, extra)) // room for "Answer: Y" or "Yes, it is open"
     }
 
     override fun report(goal: String, status: String, screen: String): String {
         val user = fit(Prompts.REPORT, screen) { "Task: $goal\nStatus: $status\nScreen:\n$it" }
-        return firstLine(send("REPORT", api, Prompts.REPORT, user, 0.3, 60))
+        return firstLine(send("REPORT", api, Prompts.REPORT, user, 0.3, 80))
     }
 
     override fun look(step: Step, jpeg: ByteArray): String {
         val v = visionApi ?: return ""; usage.vision++
-        return send("LOOK", v, Prompts.LOOK, "Step: ${step.doing} (done when: ${step.doneWhen})", 0.1, 12, jpeg = jpeg)
+        return send("LOOK", v, Prompts.LOOK, "Step: ${step.doing} (done when: ${step.doneWhen})", 0.1, 24, jpeg = jpeg)
     }
 
     /** Shrink only the digest (16 -> 10 -> 6 items) until the estimated prompt is <= 430 tokens. */
@@ -113,8 +119,8 @@ class Llm(
     }
 }
 
-private val VERBS = setOf("open", "tap", "type", "scroll", "key")
-private val ALIAS = mapOf("click" to "tap", "press" to "key", "swipe" to "scroll", "launch" to "open", "input" to "type")
+private val VERBS = setOf("open", "tap", "type", "scroll", "key", "done")
+private val ALIAS = mapOf("click" to "tap", "press" to "key", "swipe" to "scroll", "launch" to "open", "input" to "type", "finished" to "done", "complete" to "done", "completed" to "done")
 private val DIRS = setOf("down", "up", "left", "right")
 private val KEYS = setOf("back", "home", "enter", "notifications")
 /** Drop <think>...</think> (and a dangling </think>), return the first non-empty line. */
@@ -174,6 +180,7 @@ fun parse(reply: String, items: List<Item>, maxMark: Int = 0): Pair<Cmd?, String
         return pool.filter { it.label.lowercase().startsWith(q) }.singleOrNull()?.id
     }
     return when (verb) {
+        "done" -> Cmd.Done to null
         "open" -> unq(rest).trimEnd('.').let { if (it.isEmpty()) null to "open needs an app or website" else Cmd.Open(it) to null }
         "scroll" -> word(rest).let { if (it in DIRS) Cmd.Scroll(it) to null else null to "scroll needs down, up, left or right" }
         "key" -> word(rest).let { if (it in KEYS) Cmd.Key(it) to null else null to "key needs back, home, enter or notifications" }

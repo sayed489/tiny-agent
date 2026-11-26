@@ -137,6 +137,11 @@ class LlmTest {
         bad("tap on it")
     }
 
+    @Test fun doneSignal() {
+        ok("done", Cmd.Done); ok("Done.", Cmd.Done); ok("finished", Cmd.Done); ok("Step completed.", Cmd.Done)
+        assertTrue(Screen.tokens(Prompts.ACT) <= 150 && Screen.tokens(Prompts.CHECK) <= 150)
+    }
+
     @Test fun tinyModelPhrasing() {
         ok("I will tap 3", Cmd.Tap(3))
         ok("tap(2)", Cmd.Tap(2))
@@ -165,7 +170,7 @@ class LlmTest {
         val plan = Llm(api).plan("weather in Tokyo", emptyList(), "App: Launcher | popup: no | keyboard: no")
         assertEquals(listOf(Step("weather in Tokyo", "the goal is done", false)), plan)
         assertEquals(listOf(0.3, 0.5), api.calls.map { it.temp })
-        assertTrue(api.calls.all { it.max == 150 })
+        assertTrue(api.calls.all { it.max == 240 })
     }
 
     @Test fun samplingPerCallType() {
@@ -176,7 +181,7 @@ class LlmTest {
         llm.check("Chrome is open", "App: X | popup: no | keyboard: no")
         llm.report("g", "done", "App: X | popup: no | keyboard: no")
         llm.look(st, byteArrayOf(1, 2, 3))
-        assertEquals(listOf(24, 8, 60, 12), api.calls.map { it.max })
+        assertEquals(listOf(48, 16, 80, 24), api.calls.map { it.max })
         assertEquals(listOf(0.1, 0.1, 0.3, 0.1), api.calls.map { it.temp })
         assertTrue(api.calls.last().msgs[1].jpeg != null)
     }
@@ -188,9 +193,9 @@ class LlmTest {
 
     @Test fun checkPromptCarriesTheLastAction() {
         val api = FakeApi("Answer: Y")
-        assertTrue(Llm(api).check("YouTube is open", "App: YouTube | popup: no | keyboard: no", "open YouTube -> opened YouTube"))
-        assertEquals("Last action: open YouTube -> opened YouTube\nScreen:\nApp: YouTube | popup: no | keyboard: no\nDoes the screen show this: YouTube is open?",
-            api.calls[0].msgs[1].text)
+        assertTrue(Llm(api).check("YouTube is open", "App: YouTube | popup: no | keyboard: no", "open YouTube -> opened YouTube", "open youtube.com"))
+        assertEquals("Step: open youtube.com\nDone when: YouTube is open\nLast action: open YouTube -> opened YouTube\n" +
+            "Screen:\nApp: YouTube | popup: no | keyboard: no\nIs this step done?", api.calls[0].msgs[1].text)
         assertEquals(Prompts.CHECK, api.calls[0].msgs[0].text)
     }
 

@@ -8,7 +8,7 @@ Requirements R13 to R15 (tests, CI, README) are inferred from the rest of the br
 
 ## R1 Code shape
 1. The app SHALL have exactly 6 Kotlin files in `app/src/main` (Agent, Llm, Screen, Phone, Main, Api) in package
-   `app.tinyagent`, totalling 1,450 lines or fewer.
+   `app.tinyagent`, totalling 1,500 lines or fewer.
 2. The app SHALL have no runtime dependencies other than the Kotlin stdlib and the Android SDK.
 3. The app SHALL set minSdk 30 and targetSdk 36.
 

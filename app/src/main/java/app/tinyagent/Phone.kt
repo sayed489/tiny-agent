@@ -61,7 +61,10 @@ class Phone : AccessibilityService(), Device, Ui {
         agent = a; apps = null; dims = null
         showPill()
         worker = Thread({
-            try { a.run(goal) } catch (e: Exception) { log("Result (crash): $e") } finally { agent = null; main.post { stopBtn?.text = "Close"; yesBtn?.visibility = View.GONE } }
+            try { a.run(goal) } catch (e: Exception) { log("Result (crash): $e") } finally {
+                agent = null; main.post { stopBtn?.text = "Close"; yesBtn?.visibility = View.GONE }
+                main.postDelayed({ if (agent == null) hidePill() }, 6000) // the result is in the chat; don't cover other apps
+            }
         }, "agent").also { it.start() }
         return true
     }
@@ -98,6 +101,7 @@ class Phone : AccessibilityService(), Device, Ui {
         pill = box; pillText = tv; yesBtn = yes; stopBtn = stop
     }
 
+    fun hideIfIdle() { main.post { if (agent == null) hidePill() } }
     private fun hidePill() { pill?.let { getSystemService(WindowManager::class.java).removeView(it) }; pill = null }
 
     /** Hide/show the pill on the main thread and wait until it is applied (for gestures and screenshots). */
@@ -194,7 +198,7 @@ class Phone : AccessibilityService(), Device, Ui {
         try { startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)) } catch (e: Exception) { return Res(false, "cannot open $t") }
         val t0 = SystemClock.uptimeMillis()
         while (pkg != null && pkg != "android" && SystemClock.uptimeMillis() - t0 < 8000 && rootInActiveWindow?.packageName?.toString() != pkg) Thread.sleep(150)
-        return Res(true, "opened $t")
+        return if (pkg == null || pkg == "android" || rootInActiveWindow?.packageName?.toString() == pkg) Res(true, "opened $t") else Res(false, "$t did not open within 8 s")
     }
 
     override fun tap(n: N): Res {
@@ -217,7 +221,7 @@ class Phone : AccessibilityService(), Device, Ui {
         var a = n?.ref as? AccessibilityNodeInfo
         if (n != null && a != null && !a.isEditable) { tap(n); settle(2000); a = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }
         if (a == null) a = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: onlyInput()
-        if (a == null || !a.isEditable) return Res(false, "no input to type into")
+        if (a == null || !a.isEditable) return Res(false, "no text box on screen: tap a search box or search icon first")
         if (a.isPassword) return Res(false, "password field: the user must type it")
         val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) }
         if (a.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args) && hasText(a, text)) return Res(true, "typed; key enter submits")

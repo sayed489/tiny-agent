@@ -44,6 +44,8 @@ These are as specified in brief section 2, with these additions:
 | Reasoning models: on an empty, cut-off reply, raise the output budget to 2048 and send `reasoning_effort` (low, then none) | gpt-5/o-series spent the 24-150 token budgets on reasoning and returned nothing, which made every plan fall back to one giant step. |
 | CHECK sends `Last action: …`, allows 8 output tokens and takes the first yes/no word anywhere in the reply | With 2 tokens and a starts-with-Y test, a small model that wrote "Answer: Y" was read as no, so steps (for example "YouTube is open") never ticked. |
 | A 3rd consecutive scroll on a step counts as no progress | New content changes the hash, so aimless scrolling never looked stuck and used all 8 actions. |
+| Step ticking, beyond CHECK on each changed screen: (1) CHECK sees the step's action, done-when and last action, and says Y when details differ; (2) the model may reply `done`, which runs CHECK; (3) a step that reads as `open X` ticks when an `open` of X succeeds | Planners write over-specific done-when text ("homepage with search bar visible"), and models know a step is finished before CHECK agrees. |
+| Output budgets PLAN 240, ACT 48, CHECK 16, REPORT 80, LOOK 24 | Small models pad replies; cut-off replies parsed as errors. Prompt budget (450) is unchanged. |
 | No provider presets or model autofill | Settings stay provider-neutral: the user pastes Base URL, key and model. |
 | `usesCleartextTraffic=true` | Self-hosted servers on a LAN usually serve plain HTTP. The README tells users to use HTTPS elsewhere. |
 

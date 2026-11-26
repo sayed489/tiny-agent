@@ -39,7 +39,8 @@ class FakeBrain(
     override fun plan(goal: String, facts: List<String>, screen: String): List<Step> { planFacts += facts; lastPlan = plans.removeFirstOrNull() ?: lastPlan; return lastPlan }
     override fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String): String { actLasts += last; return acts(screen, last) }
     val checkLasts = ArrayList<String>()
-    override fun check(doneWhen: String, screen: String, last: String): Boolean { checks++; checkLasts += last; return screen.contains(doneWhen) }
+    val checkSteps = ArrayList<String>()
+    override fun check(doneWhen: String, screen: String, last: String, doing: String): Boolean { checks++; checkLasts += last; checkSteps += doing; return screen.contains(doneWhen) }
     override fun report(goal: String, status: String, screen: String): String { reports++; return "report: $status" }
     override fun look(step: Step, jpeg: ByteArray): String = looks.removeFirstOrNull() ?: "key back"
 }
@@ -61,7 +62,7 @@ class AgentTest {
 
     private fun weatherDevice() = FakeDevice("home", mapOf("home" to home, "google" to google, "typed" to typed, "results" to results)) { a ->
         when {
-            a == "open google.com" -> { screen = "google"; Res(true, "opened") }
+            a.lowercase().startsWith("open google") -> { screen = "google"; Res(true, "opened") }
             a.startsWith("type Search") -> { screen = "typed"; Res(true, "typed; key enter submits") }
             a == "key enter" && screen == "typed" -> { screen = "results"; Res(true, "pressed enter") }
             else -> Res(true, "ok")
@@ -113,9 +114,46 @@ class AgentTest {
 
     @Test fun checkGetsTheLastActionAsEvidence() {
         val dev = weatherDevice()
-        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com", "Google", false)))), { _, _ -> "open google.com" })
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("go to Google", "Google", false)))), { _, _ -> "open google.com" })
         Agent(dev, brain, FakeUi(), cfg).run("open google")
         assertEquals(listOf("open google.com -> opened"), brain.checkLasts)
+        assertEquals(listOf("go to Google"), brain.checkSteps) // CHECK is told what the step does, not only its done-when text
+    }
+
+    @Test fun openStepTicksWhenTheAppOpensEvenIfDoneWhenIsTooStrict() {
+        val dev = weatherDevice()
+        // The planner's done-when is over-specific; CHECK would say no. Opening the target is proof enough.
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com", "Google homepage with a visible search bar and logo", false)))),
+            { _, _ -> "open Google" })
+        assertEquals("report: done", Agent(dev, brain, FakeUi(), cfg).run("open google"))
+        assertEquals(0, brain.checks)
+        assertEquals(listOf("open Google"), dev.actions)
+    }
+
+    @Test fun openingSomethingElseStillNeedsCheck() {
+        val dev = weatherDevice()
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open YouTube", "YouTube", false)))), { _, _ -> "open google.com" })
+        Agent(dev, brain, FakeUi(), cfg).run("youtube")
+        assertTrue(brain.checks > 0)
+    }
+
+    @Test fun modelCanSayDoneAndTheHarnessVerifies() {
+        val shown = listOf(app(textNode("Alarm set for 7:30", 300), button("OK", 600), label = "Clock"))
+        val dev = FakeDevice("clock", mapOf("clock" to shown))
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("set the alarm", "Alarm set for 7:30", false)))), { _, _ -> "done" })
+        assertEquals("report: done", Agent(dev, brain, FakeUi(), cfg).run("alarm"))
+        assertTrue(dev.actions.isEmpty())
+    }
+
+    @Test fun earlyDoneIsRejected() {
+        val dev = FakeDevice("home", mapOf("home" to home))
+        var n = 0
+        val brain = FakeBrain(ArrayDeque(listOf(listOf(Step("open the clock", "Alarm", false)))), { _, _ -> if (n++ == 0) "done" else "tap 2" })
+        val ui = FakeUi()
+        Agent(dev, brain, ui, cfg).run("alarm")
+        assertTrue(brain.actLasts[1].startsWith("ERR the step is not done yet: Alarm"))
+        assertTrue(ui.logs.contains("· not yet: Alarm"))
+        assertEquals("tap Clock", dev.actions.first())
     }
 
     @Test fun endlessScrollingCountsAsNoProgress() {

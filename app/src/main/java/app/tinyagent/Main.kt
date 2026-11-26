@@ -98,7 +98,7 @@ class Main : Activity() {
             .setPositiveButton("I understand") { _, _ -> Store.setFlag(this, "privacy", true); if (Phone.instance == null) askService() }.show()
     }
 
-    override fun onResume() { super.onResume(); RunLog.listener = { runOnUiThread { render() } }; refresh() }
+    override fun onResume() { super.onResume(); RunLog.listener = { runOnUiThread { render() } }; Phone.instance?.hideIfIdle(); refresh() }
     override fun onPause() { super.onPause(); RunLog.listener = null }
     private fun refresh() {
         val prob = Store.problem(this); val svc = Phone.instance != null
@@ -130,12 +130,12 @@ class Main : Activity() {
         fun flush() {
             val cur = (1..plan.size).firstOrNull { it !in done }
             val lines = (if (replan.isEmpty()) emptyList() else listOf(replan)) +
-                plan.mapIndexed { i, p -> (if (i + 1 in done) "✓ " else if (busy && i + 1 == cur) "▶ " else "    ") + "${i + 1}. $p" } +
-                (if (acts.isEmpty() || plan.isEmpty()) acts else listOf("") + acts.takeLast(5)) + (if (busy) listOf("…") else emptyList())
+                plan.mapIndexed { i, p -> (if (i + 1 in done) "✓ " else if (busy && i + 1 == cur) "▶ " else "    ") + "${i + 1}. ${p.take(44)}" } +
+                (if (acts.isEmpty() || plan.isEmpty()) acts else listOf("") + acts.takeLast(4)) + (if (busy) listOf("…") else emptyList())
             if (plan.isNotEmpty() || acts.isNotEmpty()) msgs.addView(bubble(lines.joinToString("\n"), false, 0xFFE9EAF2.toInt(), 13f))
             plan = ArrayList(); done.clear(); acts = ArrayList(); replan = ""
         }
-        fun note(x: String) { if (acts.lastOrNull() != x) acts += x }
+        fun note(x: String) { if (x.startsWith("· not yet")) acts.removeAll { it.startsWith("· not yet") }; if (acts.lastOrNull() != x) acts += x }
         for (l in RunLog.text().lines()) when {
             l.startsWith("Goal: ") -> { flush(); msgs.addView(bubble(l.drop(6), true)); busy = true }
             l.startsWith("Result (") -> {

@@ -50,7 +50,7 @@ class Agent(
             while (k < plan.size) {
                 val st = plan[k]; curK = k + 1
                 ui.status("Step ${k + 1}/${plan.size}: ${st.doing}")
-                if ((k > 0 || fresh) && call { brain.check(st.doneWhen, read(), lastDone) }) { ui.log("✓ ${k + 1} already done"); fresh = false; k++; continue }
+                if ((k > 0 || fresh) && call { brain.check(st.doneWhen, read(), lastDone, st.doing) }) { ui.log("✓ ${k + 1} already done"); fresh = false; k++; continue }
                 fresh = false
                 if (((st.risky && cfg.confirmRisky) || cfg.confirmEvery) && !ui.ask("About to: ${st.doing}"))
                     throw Halt("stopped", "You declined: ${st.doing}")
@@ -110,6 +110,10 @@ class Agent(
                 if (c == null) { last = "ERR $err"; noProg++ }
                 c
             } ?: continue
+            if (cmd is Cmd.Done) { // the model says the step is finished: verify before ticking, so an early "done" can't skip work
+                if (call { brain.check(st.doneWhen, Screen.digest(wins, Mode.READ, 200, w, h).text, lastDone, st.doing) }) return true
+                ui.log("· not yet: ${st.doneWhen}"); last = "ERR the step is not done yet: ${st.doneWhen}. Do the next action for it."; noProg++; continue
+            }
             if (cmd is Cmd.Type && target(cmd, d)?.node?.password == true) {
                 if (!ui.ask("Type your password, then tap Continue")) throw Halt("stopped", "Stopped")
                 dev.settle(); wins = dev.windows(); d = act(wins); last = "user typed the password"; continue
@@ -121,6 +125,8 @@ class Agent(
             ui.log("→ $label: ${res.msg}")
             dev.settle()
             if (res.missingApp != null) { fact("${res.missingApp} is not installed; use its website"); return false }
+            // The step is "open X" and X opened (or was already open): proof enough, even if its done-when text is too strict.
+            if (res.ok && cmd is Cmd.Open && opens(st, cmd)) { lastDone = "$label -> ${res.msg}"; return true }
             val wins2 = dev.windows(); val d2 = act(wins2)
             when {
                 !res.ok -> { last = "$label failed: ${res.msg}"; noProg++ }
@@ -130,7 +136,7 @@ class Agent(
                     last = "$label -> screen changed"; seen += d2.hash
                     if (cmd is Cmd.Scroll && ++scrolls > 2) { last = "$label -> screen changed; scrolled $scrolls times in a row, try another command"; noProg++ }
                     lastDone = "$label -> ${res.msg}"
-                    if (call { brain.check(st.doneWhen, Screen.digest(wins2, Mode.READ, 200, w, h).text, lastDone) }) return true
+                    if (call { brain.check(st.doneWhen, Screen.digest(wins2, Mode.READ, 200, w, h).text, lastDone, st.doing) }) return true
                     ui.log("· not yet: ${st.doneWhen}")
                 }
             }
@@ -169,6 +175,14 @@ class Agent(
         is Cmd.Type -> dev.type(c.id?.let { id -> d.items.firstOrNull { it.id == id }?.node }, c.text)
         is Cmd.Scroll -> dev.scroll(c.dir, null)
         is Cmd.Key -> dev.key(c.k)
+        Cmd.Done -> Res(true, "done")
+    }
+
+    /** True when the step itself reads as an open command and the opened target shares a 4+ letter word with it (youtube.com ~ YouTube). */
+    private fun opens(st: Step, c: Cmd.Open): Boolean {
+        val want = parse(st.doing, emptyList()).first as? Cmd.Open ?: return false
+        fun words(s: String) = String(s.lowercase().map { if (it.isLetterOrDigit()) it else ' ' }.toCharArray()).split(' ').filter { it.length >= 4 }.toSet()
+        return words(want.target).intersect(words(c.target)).isNotEmpty()
     }
 
     /** Commands in label form: ids are renumbered on every screen, labels are not. */
@@ -178,6 +192,7 @@ class Agent(
         is Cmd.Type -> (target(c, d)?.let { "type \"${it.label}\" " } ?: "type ") + "\"${c.text}\""
         is Cmd.Scroll -> "scroll ${c.dir}"
         is Cmd.Key -> "key ${c.k}"
+        Cmd.Done -> "done"
     }
 
     private fun target(c: Cmd.Type, d: Digest): Item? = if (c.id != null) d.items.firstOrNull { it.id == c.id }
