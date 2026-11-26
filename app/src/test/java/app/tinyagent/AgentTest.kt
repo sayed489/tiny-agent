@@ -273,19 +273,6 @@ class AgentTest {
         assertTrue(dev.shots.isEmpty())
     }
 
-    @Test fun localServerRunsCallsOneByOne() {
-        val dev = weatherDevice()
-        var acts = 0
-        val inner = FakeBrain(ArrayDeque(listOf(listOf(Step("open google.com", "Google", false), Step("search weather Tokyo", "Tokyo 18°C", false)))), { s, _ ->
-            when { s.contains("Launcher") -> "open google.com"; s.contains("= \"weather Tokyo\"") -> "key enter"; else -> "type Search weather Tokyo" }
-        })
-        val brain = object : Brain by inner {
-            override fun act(goal: String, step: Step, k: Int, n: Int, last: String, tried: List<String>, screen: String) = inner.act(goal, step, k, n, last, tried, screen).also { acts++ }
-        }
-        assertEquals("report: done", Agent(dev, brain, FakeUi(), cfg.copy(parallel = false)).run("weather"))
-        assertEquals(3, acts) // no speculative ACT calls thrown away
-    }
-
     @Test fun usageLineInRupees() {
         val ui = FakeUi()
         val usage = Usage().apply { calls = 86; tokIn = 24370; tokOut = 1062 } // the run from the log

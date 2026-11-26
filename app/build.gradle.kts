@@ -13,8 +13,8 @@ android {
         applicationId = "app.tinyagent"
         minSdk = 30
         targetSdk = 36
-        versionCode = 12
-        versionName = "0.3.0"
+        versionCode = 13
+        versionName = "0.3.1"
     }
 
     buildTypes {

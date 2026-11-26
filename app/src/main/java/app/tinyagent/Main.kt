@@ -298,15 +298,9 @@ object Store {
             else if (flag(c, "vis", false)) Endpoint(g("url"), g("key"), g("model"), g("extra")) else null // a vision-language model serves both
         return Config(Endpoint(g("url"), g("key"), g("model"), g("extra")), g("pmodel"), vision, iw, ih,
             flag(c, "risky", true), flag(c, "every", false), flag(c, "yn", false),
-            num(g("pin")), num(g("pout")), num(g("rate").ifEmpty { "92" }), parallel = !local(cleanBaseUrl(g("url"))))
+            num(g("pin")), num(g("pout")), num(g("rate").ifEmpty { "92" }))
     }
     private fun num(s: String) = s.replace(',', '.').trim('$', '₹', ' ').toDoubleOrNull() ?: 0.0
-    /** A server on this phone or your network: it usually runs one request at a time, so parallel calls only slow it down. */
-    fun local(url: String): Boolean {
-        val h = runCatching { java.net.URL(url).host.lowercase() }.getOrDefault("")
-        return h == "localhost" || h.startsWith("127.") || h.startsWith("10.") || h.startsWith("192.168.") || h.endsWith(".local") ||
-            (h.startsWith("172.") && h.split('.').getOrNull(1)?.toIntOrNull() in 16..31)
-    }
 
     private fun ksKey(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
